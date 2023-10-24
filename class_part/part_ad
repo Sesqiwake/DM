@@ -1,0 +1,500 @@
+		{
+			$this->processOrderAction();
+		}
+	}
+
+	protected function confirmSmsCodeAction()
+	{
+		global $USER;
+
+		if ($USER->IsAuthorized())
+		{
+			$this->refreshOrderAjaxAction();
+		}
+
+		$request = $this->request->get('order') ?: [];
+		$code = isset($request['SMS_CODE']) ? trim((string)$request['SMS_CODE']) : '';
+
+		if (!empty($code))
+		{
+			$signedData = isset($request['SIGNED_DATA']) ? trim((string)$request['SIGNED_DATA']) : '';
+			$params = PhoneAuth::extractData($signedData);
+
+			if ($params)
+			{
+				$userId = CUser::VerifyPhoneCode($params['phoneNumber'], $code);
+
+				if ($userId)
+				{
+					if ($this->arResult['AUTH']['new_user_phone_required'] === 'Y')
+					{
+						//the user was added as inactive, now phone number is confirmed, activate them
+						$user = new CUser();
+						$user->Update($userId, ['ACTIVE' => 'Y']);
+					}
+
+					// authorize user
+					$USER->Authorize($userId);
+
+					if ($USER->IsAuthorized())
+					{
+						$this->refreshOrderAjaxAction();
+					}
+				}
+			}
+		}
+
+		$this->showAjaxAnswer([
+			'error' => Loc::getMessage('SOA_WRONG_SMS_CODE'),
+		]);
+	}
+
+	protected function checkSocServicesAuthForm()
+	{
+		global $APPLICATION;
+		$arResult =& $this->arResult;
+
+		$arResult["ALLOW_SOCSERV_AUTHORIZATION"] = Option::get("main", "allow_socserv_authorization", "Y") == "Y" ? "Y" : "N";
+		$arResult["AUTH_SERVICES"] = false;
+		$arResult["CURRENT_SERVICE"] = false;
+		$arResult["FOR_INTRANET"] = false;
+
+		if (Loader::includeModule("socialservices") && $arResult["ALLOW_SOCSERV_AUTHORIZATION"] == 'Y')
+		{
+			$oAuthManager = new CSocServAuthManager();
+			$arServices = $oAuthManager->GetActiveAuthServices([
+				'BACKURL' => $this->arParams['~CURRENT_PAGE'],
+				'FOR_INTRANET' => $arResult['FOR_INTRANET'],
+			]);
+
+			if (!empty($arServices))
+			{
+				$arResult["AUTH_SERVICES"] = $arServices;
+				if (isset($this->request["auth_service_id"])
+					&& $this->request["auth_service_id"] != ''
+					&& isset($arResult["AUTH_SERVICES"][$this->request["auth_service_id"]])
+				)
+				{
+					$arResult["CURRENT_SERVICE"] = $this->request["auth_service_id"];
+					if (isset($this->request["auth_service_error"]) && $this->request["auth_service_error"] <> '')
+					{
+						$this->addError($oAuthManager->GetError($arResult["CURRENT_SERVICE"], $this->request["auth_service_error"]), self::AUTH_BLOCK);
+					}
+					elseif (!$oAuthManager->Authorize($this->request["auth_service_id"]))
+					{
+						$ex = $APPLICATION->GetException();
+						if ($ex)
+							$this->addError($ex->GetString(), self::AUTH_BLOCK);
+					}
+				}
+			}
+		}
+	}
+
+	protected function doAuthorize()
+	{
+		global $USER;
+		$request = $this->isRequestViaAjax && $this->request->get('save') != 'Y' ? $this->request->get('order') : $this->request;
+
+		if ($request["USER_LOGIN"] == '')
+			$this->addError(Loc::getMessage("STOF_ERROR_AUTH_LOGIN"), self::AUTH_BLOCK);
+
+		if (empty($this->arResult["ERROR"]))
+		{
+			$rememberMe = $request["USER_REMEMBER"] == 'Y' ? 'Y' : 'N';
+			$arAuthResult = $USER->Login($request["USER_LOGIN"], $request["USER_PASSWORD"], $rememberMe);
+			if ($arAuthResult != false && $arAuthResult["TYPE"] == "ERROR")
+				$this->addError(Loc::getMessage("STOF_ERROR_AUTH").($arAuthResult["MESSAGE"] <> '' ? ": ".$arAuthResult["MESSAGE"] : ""), self::AUTH_BLOCK);
+		}
+	}
+
+	protected function doRegister()
+	{
+		global $APPLICATION, $USER;
+		$arResult =& $this->arResult;
+		$request = $this->isRequestViaAjax && $this->request->get('save') != 'Y' ? $this->request->get('order') : $this->request;
+
+		if ($request['NEW_NAME'] == '')
+		{
+			$this->addError(Loc::getMessage('STOF_ERROR_REG_NAME'), self::AUTH_BLOCK);
+		}
+
+		if ($request['NEW_LAST_NAME'] == '')
+		{
+			$this->addError(Loc::getMessage('STOF_ERROR_REG_LASTNAME'), self::AUTH_BLOCK);
+		}
+
+		if (Option::get('main', 'new_user_email_required', '') === 'Y')
+		{
+			if ($request['NEW_EMAIL'] == '')
+			{
+				$this->addError(Loc::getMessage('STOF_ERROR_REG_EMAIL'), self::AUTH_BLOCK);
+			}
+			elseif (!check_email($request['NEW_EMAIL']))
+			{
+				$this->addError(Loc::getMessage('STOF_ERROR_REG_BAD_EMAIL'), self::AUTH_BLOCK);
+			}
+		}
+
+		$arResult['AUTH']['NEW_EMAIL'] = $request['NEW_EMAIL'];
+		$arResult['AUTH']['PHONE_NUMBER'] = $request['PHONE_NUMBER'];
+
+		if (empty($arResult['ERROR']))
+		{
+			if ($request['NEW_GENERATE'] === 'Y')
+			{
+				$generatedData = $this->generateUserData(['EMAIL' => $request['NEW_EMAIL']]);
+				$arResult['AUTH'] = array_merge($arResult['AUTH'], $generatedData);
+			}
+			else
+			{
+				if ($request['NEW_LOGIN'] == '')
+				{
+					$this->addError(Loc::getMessage('STOF_ERROR_REG_FLAG'), self::AUTH_BLOCK);
+				}
+
+				if ($request['NEW_PASSWORD'] == '')
+				{
+					$this->addError(Loc::getMessage('STOF_ERROR_REG_FLAG1'), self::AUTH_BLOCK);
+				}
+
+				if ($request['NEW_PASSWORD'] <> '' && $request['NEW_PASSWORD_CONFIRM'] == '')
+				{
+					$this->addError(Loc::getMessage('STOF_ERROR_REG_FLAG1'), self::AUTH_BLOCK);
+				}
+
+				if (
+					$request['NEW_PASSWORD'] <> ''
+					&& $request['NEW_PASSWORD_CONFIRM'] <> ''
+					&& $request['NEW_PASSWORD'] != $request['NEW_PASSWORD_CONFIRM']
+				)
+				{
+					$this->addError(Loc::getMessage('STOF_ERROR_REG_PASS'), self::AUTH_BLOCK);
+				}
+
+				$arResult['AUTH']['NEW_LOGIN'] = $request['NEW_LOGIN'];
+				$arResult['AUTH']['NEW_NAME'] = $request['NEW_NAME'];
+				$arResult['AUTH']['NEW_PASSWORD'] = $request['NEW_PASSWORD'];
+				$arResult['AUTH']['NEW_PASSWORD_CONFIRM'] = $request['NEW_PASSWORD_CONFIRM'];
+			}
+		}
+
+		if (empty($arResult['ERROR']))
+		{
+			$arAuthResult = $USER->Register(
+				$arResult['AUTH']['NEW_LOGIN'],
+				$request['NEW_NAME'],
+				$request['NEW_LAST_NAME'],
+				$arResult['AUTH']['NEW_PASSWORD'],
+				$arResult['AUTH']['NEW_PASSWORD_CONFIRM'],
+				$arResult['AUTH']['NEW_EMAIL'],
+				LANG,
+				$request['captcha_word'],
+				$request['captcha_sid'],
+				false,
+				$arResult['AUTH']['PHONE_NUMBER']
+			);
+
+			if ($arAuthResult != false && $arAuthResult['TYPE'] === 'ERROR')
+			{
+				$this->addError(Loc::getMessage('STOF_ERROR_REG').($arAuthResult['MESSAGE'] <> '' ? ': '.$arAuthResult['MESSAGE'] : ''), self::AUTH_BLOCK);
+			}
+			else
+			{
+				if ($USER->IsAuthorized())
+				{
+					if ($this->arParams['SEND_NEW_USER_NOTIFY'] === 'Y')
+					{
+						CUser::SendUserInfo($USER->GetID(), $this->getSiteId(), Loc::getMessage('INFO_REQ'), true);
+					}
+
+					if ($this->isRequestViaAjax)
+					{
+						$this->refreshOrderAjaxAction();
+					}
+					else
+					{
+						LocalRedirect($APPLICATION->GetCurPageParam());
+					}
+				}
+				elseif ($arResult['AUTH']['new_user_phone_auth'] === 'Y' && $arResult['AUTH']['PHONE_NUMBER'] !== '')
+				{
+					$arResult['SMS_AUTH'] = $arAuthResult;
+				}
+				else
+				{
+					$arResult['OK_MESSAGE'][] = Loc::getMessage('STOF_ERROR_REG_CONFIRM');
+				}
+			}
+		}
+
+		$arResult['AUTH']['~NEW_LOGIN'] = $arResult['AUTH']['NEW_LOGIN'];
+		$arResult['AUTH']['NEW_LOGIN'] = htmlspecialcharsEx($arResult['AUTH']['NEW_LOGIN']);
+		$arResult['AUTH']['~NEW_NAME'] = $request['NEW_NAME'];
+		$arResult['AUTH']['NEW_NAME'] = htmlspecialcharsEx($request['NEW_NAME']);
+		$arResult['AUTH']['~NEW_LAST_NAME'] = $request['NEW_LAST_NAME'];
+		$arResult['AUTH']['NEW_LAST_NAME'] = htmlspecialcharsEx($request['NEW_LAST_NAME']);
+		$arResult['AUTH']['~NEW_EMAIL'] = $arResult['AUTH']['NEW_EMAIL'];
+		$arResult['AUTH']['NEW_EMAIL'] = htmlspecialcharsEx($arResult['AUTH']['NEW_EMAIL']);
+		$arResult['AUTH']['~PHONE_NUMBER'] = $arResult['AUTH']['PHONE_NUMBER'];
+		$arResult['AUTH']['PHONE_NUMBER'] = htmlspecialcharsEx($arResult['AUTH']['PHONE_NUMBER']);
+	}
+
+	protected function initStatGid()
+	{
+		if (Loader::includeModule("statistic"))
+			$this->order->setField('STAT_GID', CStatistic::GetEventParam());
+	}
+
+	protected function initAffiliate()
+	{
+		$affiliateID = CSaleAffiliate::GetAffiliate();
+		if ($affiliateID > 0)
+		{
+			$dbAffiliate = CSaleAffiliate::GetList([], ["SITE_ID" => $this->getSiteId(), "ID" => $affiliateID]);
+			$arAffiliates = $dbAffiliate->Fetch();
+			if (count($arAffiliates) > 1)
+				$this->order->setField('AFFILIATE_ID', $affiliateID);
+		}
+	}
+
+	/**
+	 * Generation of user registration fields (login, password, etc)
+	 *
+	 * @param array $userProps
+	 * @return array
+	 * @throws Main\ArgumentNullException
+	 */
+	public function generateUserData($userProps = [])
+	{
+		$userEmail = isset($userProps['EMAIL']) ? trim((string)$userProps['EMAIL']) : '';
+		$newLogin = $userEmail;
+
+		if (empty($userEmail))
+		{
+			$newEmail = false;
+			$normalizedPhone = $this->getNormalizedPhone($userProps['PHONE']);
+
+			if (!empty($normalizedPhone))
+			{
+				$newLogin = $normalizedPhone;
+			}
+		}
+		else
+		{
+			$newEmail = $userEmail;
+		}
+
+		if (empty($newLogin))
+		{
+			$newLogin = randString(5).mt_rand(0, 99999);
+		}
+
+		$pos = mb_strpos($newLogin, '@');
+		if ($pos !== false)
+		{
+			$newLogin = mb_substr($newLogin, 0, $pos);
+		}
+
+		if (mb_strlen($newLogin) > 47)
+		{
+			$newLogin = mb_substr($newLogin, 0, 47);
+		}
+
+		$newLogin = str_pad($newLogin, 3, '_');
+
+		$dbUserLogin = CUser::GetByLogin($newLogin);
+		if ($userLoginResult = $dbUserLogin->Fetch())
+		{
+			do
+			{
+				$newLoginTmp = $newLogin.mt_rand(0, 99999);
+				$dbUserLogin = CUser::GetByLogin($newLoginTmp);
+			} while ($userLoginResult = $dbUserLogin->Fetch());
+
+			$newLogin = $newLoginTmp;
+		}
+
+		$newName = '';
+		$newLastName = '';
+		$payerName = isset($userProps['PAYER']) ? trim((string)$userProps['PAYER']) : '';
+
+		if (!empty($payerName))
+		{
+			$arNames = explode(' ', $payerName);
+
+			if (isset($arNames[1]))
+			{
+				$newName = $arNames[1];
+				$newLastName = $arNames[0];
+			}
+			else
+			{
+				$newName = $arNames[0];
+			}
+		}
+
+		$groupIds = [];
+		$defaultGroups = Option::get('main', 'new_user_registration_def_group', '');
+
+		if (!empty($defaultGroups))
+		{
+			$groupIds = explode(',', $defaultGroups);
+		}
+
+		$newPassword = \CUser::GeneratePasswordByPolicy($groupIds);
+
+		return [
+			'NEW_EMAIL' => $newEmail,
+			'NEW_LOGIN' => $newLogin,
+			'NEW_NAME' => $newName,
+			'NEW_LAST_NAME' => $newLastName,
+			'NEW_PASSWORD' => $newPassword,
+			'NEW_PASSWORD_CONFIRM' => $newPassword,
+			'GROUP_ID' => $groupIds,
+		];
+	}
+
+	protected function getNormalizedPhone($phone)
+	{
+		if ($this->arParams['USE_PHONE_NORMALIZATION'] === 'Y')
+		{
+			$phone = NormalizePhone((string)$phone, 3);
+		}
+
+		return $phone;
+	}
+
+	protected function getNormalizedPhoneForRegistration($phone)
+	{
+		return Main\UserPhoneAuthTable::normalizePhoneNumber($phone) ?: '';
+	}
+
+	/**
+	 * Creating new user and logging in
+	 *
+	 * @param $userProps
+	 * @return bool|int
+	 */
+	protected function registerAndLogIn($userProps)
+	{
+		$userId = false;
+		$userData = $this->generateUserData($userProps);
+
+		$fields = [
+			'LOGIN' => $userData['NEW_LOGIN'],
+			'NAME' => $userData['NEW_NAME'],
+			'LAST_NAME' => $userData['NEW_LAST_NAME'],
+			'PASSWORD' => $userData['NEW_PASSWORD'],
+			'CONFIRM_PASSWORD' => $userData['NEW_PASSWORD_CONFIRM'],
+			'EMAIL' => $userData['NEW_EMAIL'],
+			'GROUP_ID' => $userData['GROUP_ID'],
+			'ACTIVE' => 'Y',
+			'LID' => $this->getSiteId(),
+			'PERSONAL_PHONE' => isset($userProps['PHONE']) ? $this->getNormalizedPhone($userProps['PHONE']) : '',
+			'PERSONAL_ZIP' => isset($userProps['ZIP']) ? $userProps['ZIP'] : '',
+			'PERSONAL_STREET' => isset($userProps['ADDRESS']) ? $userProps['ADDRESS'] : '',
+		];
+
+		if ($this->arResult['AUTH']['new_user_phone_auth'] === 'Y')
+		{
+			$fields['PHONE_NUMBER'] = isset($userProps['PHONE']) ? $userProps['PHONE'] : '';
+		}
+
+		if ($this->arParams['IS_LANDING_SHOP'] === 'Y')
+		{
+			$fields['GROUP_ID'] = \Bitrix\Crm\Order\BuyerGroup::getDefaultGroups();
+			$fields['EXTERNAL_AUTH_ID'] = 'shop';
+
+			// reset department for intranet
+			$fields['UF_DEPARTMENT'] = [];
+
+			// rewrite login with email
+			if (!empty($userData['NEW_EMAIL']))
+			{
+				$fields['LOGIN'] = $userData['NEW_EMAIL'];
+			}
+		}
+
+		$user = new CUser;
+		$addResult = $user->Add($fields);
+
+		if (intval($addResult) <= 0)
+		{
+			$this->addError(Loc::getMessage('STOF_ERROR_REG').(($user->LAST_ERROR <> '') ? ': '.$user->LAST_ERROR : ''), self::AUTH_BLOCK);
+		}
+		else
+		{
+			global $USER;
+
+			$userId = intval($addResult);
+			$USER->Authorize($addResult);
+
+			if ($USER->IsAuthorized())
+			{
+				if ($this->arParams['SEND_NEW_USER_NOTIFY'] == 'Y')
+				{
+					if (
+						isset($this->arParams['CONTEXT_SITE_ID']) &&
+						$this->arParams['CONTEXT_SITE_ID'] > 0 &&
+						Loader::includeModule('landing')
+					)
+					{
+						$componentName = 'bitrix:landing.pub';
+						/** @var LandingPubComponent $className */
+						$className = \CBitrixComponent::includeComponentClass($componentName);
+						$className::replaceUrlInLetter(
+							$this->arParams['CONTEXT_SITE_ID']
+						);
+					}
+					CUser::SendUserInfo($USER->GetID(), $this->getSiteId(), Loc::getMessage('INFO_REQ'), true);
+				}
+			}
+			else
+			{
+				$this->addError(Loc::getMessage('STOF_ERROR_REG_CONFIRM'), self::AUTH_BLOCK);
+			}
+		}
+
+		return $userId;
+	}
+
+	/**
+	 * @return bool
+	 */
+	protected function needToRegister(): bool
+	{
+		global $USER;
+
+		if (!$USER->IsAuthorized())
+		{
+			$isRealUserAuthorized = false;
+		}
+		else
+		{
+			$user = UserTable::getList(
+				[
+					'filter' => [
+						'=ID' => (int)$USER->getId(),
+						'=ACTIVE' => 'Y',
+						'!=EXTERNAL_AUTH_ID' => $this->getExternalUserTypes()
+					]
+				]
+			)->fetchObject();
+
+			if ($user)
+			{
+				$isRealUserAuthorized = true;
+			}
+			else
+			{
+				$isRealUserAuthorized = false;
+			}
+		}
+
+		if (!$isRealUserAuthorized && $this->arParams['ALLOW_AUTO_REGISTER'] === 'Y')
+		{
+			return true;
+		}
+
+		return false;

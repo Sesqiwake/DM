@@ -1,0 +1,500 @@
+
+		$arAdditionalImages = [];
+		foreach ($elementIndex as $productId => $productProperties)
+		{
+			if (!empty($productProperties) && is_array($productProperties))
+			{
+				foreach ($productProperties as $code => $property)
+				{
+					if (
+						!empty($this->arParams['ADDITIONAL_PICT_PROP'])
+						&& array_key_exists($arProductData[$productId]['IBLOCK_ID'], $this->arParams['ADDITIONAL_PICT_PROP'])
+					)
+					{
+						if ($this->arParams['ADDITIONAL_PICT_PROP'][$arProductData[$productId]['IBLOCK_ID']] == $code)
+						{
+							$arAdditionalImages[$productId] = is_array($property['VALUE']) ? current($property['VALUE']) : $property['VALUE'];
+						}
+					}
+
+					if (
+						!empty($this->arIblockProps[$arProductData[$productId]['IBLOCK_ID']])
+						&& array_key_exists($code, $this->arIblockProps[$arProductData[$productId]['IBLOCK_ID']])
+					)
+					{
+						if (is_array($property['VALUE']))
+						{
+							$arProductData[$productId]['PROPERTY_'.$code.'_VALUE'] = implode(', ', $property['VALUE']);
+						}
+						else
+						{
+							$arProductData[$productId]['PROPERTY_'.$code.'_VALUE'] = $property['VALUE'];
+						}
+
+						if (is_array($property['PROPERTY_VALUE_ID']))
+						{
+							$arProductData[$productId]['PROPERTY_'.$code.'_VALUE_ID'] = implode(', ', $property['PROPERTY_VALUE_ID']);
+						}
+						else
+						{
+							$arProductData[$productId]['PROPERTY_'.$code.'_VALUE_ID'] = $property['PROPERTY_VALUE_ID'];
+						}
+
+						if ($property['PROPERTY_TYPE'] == 'L')
+						{
+							$arProductData[$productId]['PROPERTY_'.$code.'_ENUM_ID'] = $property['VALUE_ENUM_ID'];
+						}
+					}
+				}
+			}
+		}
+		unset($elementIndex);
+
+		$currentProductProperties = [];
+
+		$needToResizeProductImages = $this->arParams['COMPATIBLE_MODE'] === 'Y'
+			|| isset($this->arParams['PRODUCT_COLUMNS']['PREVIEW_PICTURE'])
+			|| isset($this->arParams['PRODUCT_COLUMNS']['DETAIL_PICTURE'])
+			|| isset($this->arParams['PRODUCT_COLUMNS_HIDDEN']['PREVIEW_PICTURE'])
+			|| isset($this->arParams['PRODUCT_COLUMNS_HIDDEN']['DETAIL_PICTURE']);
+
+		foreach ($arResult["BASKET_ITEMS"] as &$arResultItem)
+		{
+			$productId = $arResultItem["PRODUCT_ID"];
+			$arParent = $arParents[$productId];
+			$itemIblockId = intval($arProductData[$productId]['IBLOCK_ID']);
+			$currentProductProperties[$productId] = isset($this->arIblockProps[$itemIblockId])
+				? $this->arIblockProps[$itemIblockId]
+				: [];
+
+			if (
+				(int)$arProductData[$productId]["PREVIEW_PICTURE"] <= 0
+				&& (int)$arProductData[$productId]["DETAIL_PICTURE"] <= 0
+				&& $arParent
+			)
+			{
+				$productId = $arParent["ID"];
+			}
+
+			if ((int)$arProductData[$productId]["PREVIEW_PICTURE"] > 0)
+			{
+				$arResultItem["PREVIEW_PICTURE"] = $arProductData[$productId]["PREVIEW_PICTURE"];
+			}
+
+			if ((int)$arProductData[$productId]["DETAIL_PICTURE"] > 0)
+			{
+				$arResultItem["DETAIL_PICTURE"] = $arProductData[$productId]["DETAIL_PICTURE"];
+			}
+
+			if ($arProductData[$productId]["PREVIEW_TEXT"] != '')
+			{
+				$arResultItem["PREVIEW_TEXT"] = $arProductData[$productId]["PREVIEW_TEXT"];
+				$arResultItem["PREVIEW_TEXT_TYPE"] = $arProductData[$productId]["PREVIEW_TEXT_TYPE"];
+			}
+
+			if (!empty($arProductData[$arResultItem["PRODUCT_ID"]]) && is_array($arProductData[$arResultItem["PRODUCT_ID"]]))
+			{
+				foreach ($arProductData[$arResultItem["PRODUCT_ID"]] as $key => $value)
+				{
+					if (mb_strpos($key, "PROPERTY_") !== false)
+						$arResultItem[$key] = $value;
+				}
+			}
+
+			// if sku element doesn't have some property value - we'll show parent element value instead
+			if (isset($this->arSku2Parent[$arResultItem["PRODUCT_ID"]]))
+			{
+				$parentIblockId = $arProductData[$this->arSku2Parent[$arResultItem["PRODUCT_ID"]]]['IBLOCK_ID'];
+
+				if (!empty($this->arIblockProps[$parentIblockId]))
+				{
+					$currentProductProperties[$arResultItem["PRODUCT_ID"]] = array_merge(
+						$this->arIblockProps[$parentIblockId],
+						$currentProductProperties[$arResultItem["PRODUCT_ID"]]
+					);
+				}
+
+				foreach ($this->arCustomSelectFields as $field)
+				{
+					$fieldVal = $field."_VALUE";
+					$parentId = $this->arSku2Parent[$arResultItem["PRODUCT_ID"]];
+
+					// can be array or string
+					if (
+						(!isset($arResultItem[$fieldVal]) || (isset($arResultItem[$fieldVal]) && $arResultItem[$fieldVal] == ''))
+						&& (isset($arProductData[$parentId][$fieldVal]) && !empty($arProductData[$parentId][$fieldVal]))
+					)
+					{
+						$arResultItem[$fieldVal] = $arProductData[$parentId][$fieldVal];
+					}
+				}
+			}
+
+			// replace PREVIEW_PICTURE with selected ADDITIONAL_PICT_PROP
+			if (
+				empty($arProductData[$arResultItem["PRODUCT_ID"]]["PREVIEW_PICTURE"])
+				&& empty($arProductData[$arResultItem["PRODUCT_ID"]]["DETAIL_PICTURE"])
+				&& $arAdditionalImages[$arResultItem["PRODUCT_ID"]]
+			)
+			{
+				$arResultItem["PREVIEW_PICTURE"] = $arAdditionalImages[$arResultItem["PRODUCT_ID"]];
+			}
+			elseif (
+				empty($arResultItem["PREVIEW_PICTURE"])
+				&& empty($arResultItem["DETAIL_PICTURE"])
+				&& $arAdditionalImages[$productId]
+			)
+			{
+				$arResultItem["PREVIEW_PICTURE"] = $arAdditionalImages[$productId];
+			}
+
+			$arResultItem["PREVIEW_PICTURE_SRC"] = "";
+
+			if (
+				$needToResizeProductImages
+				&& isset($arResultItem["PREVIEW_PICTURE"])
+				&& (int)$arResultItem["PREVIEW_PICTURE"] > 0
+			)
+			{
+				$arImage = CFile::GetFileArray($arResultItem["PREVIEW_PICTURE"]);
+				if (!empty($arImage))
+				{
+					self::resizeImage($arResultItem, 'PREVIEW_PICTURE', $arImage,
+						["width" => 320, "height" => 320],
+						["width" => 110, "height" => 110],
+						$this->arParams['BASKET_IMAGES_SCALING']
+					);
+				}
+			}
+
+			$arResultItem["DETAIL_PICTURE_SRC"] = "";
+
+			if (
+				$needToResizeProductImages
+				&& isset($arResultItem["DETAIL_PICTURE"])
+				&& (int)$arResultItem["DETAIL_PICTURE"] > 0
+			)
+			{
+				$arImage = CFile::GetFileArray($arResultItem["DETAIL_PICTURE"]);
+				if (!empty($arImage))
+				{
+					self::resizeImage($arResultItem, 'DETAIL_PICTURE', $arImage,
+						["width" => 320, "height" => 320],
+						["width" => 110, "height" => 110],
+						$this->arParams['BASKET_IMAGES_SCALING']
+					);
+				}
+			}
+		}
+
+		if (!empty($arResult["BASKET_ITEMS"]) && $this->useCatalog)
+		{
+			$arResult["BASKET_ITEMS"] = getMeasures($arResult["BASKET_ITEMS"]);
+		}
+
+		foreach ($arResult["BASKET_ITEMS"] as $arBasketItem)
+		{
+			// prepare values for custom-looking columns
+			$arCols = [
+				"PROPS" => $this->getPropsInfo($arBasketItem),
+			];
+
+			if ($this->arParams['COMPATIBLE_MODE'] === 'Y')
+			{
+				if (isset($arBasketItem["PREVIEW_PICTURE"]) && (int)$arBasketItem["PREVIEW_PICTURE"] > 0)
+				{
+					$arCols["PREVIEW_PICTURE"] = CSaleHelper::getFileInfo(
+						$arBasketItem["PREVIEW_PICTURE"],
+						["WIDTH" => 110, "HEIGHT" => 110]
+					);
+				}
+
+				if (isset($arBasketItem["DETAIL_PICTURE"]) && (int)$arBasketItem["DETAIL_PICTURE"] > 0)
+				{
+					$arCols["DETAIL_PICTURE"] = CSaleHelper::getFileInfo(
+						$arBasketItem["DETAIL_PICTURE"],
+						["WIDTH" => 110, "HEIGHT" => 110]
+					);
+				}
+			}
+
+			if (!empty($arBasketItem["MEASURE_TEXT"]))
+			{
+				$arCols["QUANTITY"] = $arBasketItem["QUANTITY"]."&nbsp;".$arBasketItem["MEASURE_TEXT"];
+			}
+
+			foreach ($arBasketItem as $tmpKey => $value)
+			{
+				if ((mb_strpos($tmpKey, "PROPERTY_", 0) === 0) && (mb_strrpos($tmpKey, "_VALUE") == mb_strlen($tmpKey) - 6))
+				{
+					$code = str_replace(["PROPERTY_", "_VALUE"], "", $tmpKey);
+					$propData = $currentProductProperties[$arBasketItem['PRODUCT_ID']][$code];
+
+					// display linked property type
+					if ($propData['PROPERTY_TYPE'] === 'E')
+					{
+						$propData['VALUE'] = $value;
+						$arCols[$tmpKey] = $this->getLinkedPropValue($arBasketItem, $propData);
+					}
+					elseif ($propData['PROPERTY_TYPE'] === 'S' && $propData['USER_TYPE'] === 'directory')
+					{
+						$arCols[$tmpKey] = $this->getDirectoryProperty($arBasketItem, $propData);
+					}
+					else
+					{
+						$arCols[$tmpKey] = $this->getIblockProps($value, $propData, ['WIDTH' => 110, 'HEIGHT' => 110]);
+					}
+				}
+			}
+
+			$arResult["GRID"]["ROWS"][$arBasketItem["ID"]] = [
+				"id" => $arBasketItem["ID"],
+				"data" => $arBasketItem,
+				"actions" => [],
+				"columns" => $arCols,
+				"editable" => true,
+			];
+		}
+	}
+
+	/**
+	 * Set delivery data from shipment object and delivery services object to $this->arResult
+	 * Execution of 'OnSaleComponentOrderOneStepDelivery' event
+	 *
+	 * @throws Main\NotSupportedException
+	 */
+	protected function obtainDelivery()
+	{
+		$arResult =& $this->arResult;
+
+		$arStoreId = [];
+		/** @var Shipment $shipment */
+		$shipment = $this->getCurrentShipment($this->order);
+
+		if (!empty($this->arDeliveryServiceAll))
+		{
+			foreach ($this->arDeliveryServiceAll as $deliveryObj)
+			{
+				$arDelivery =& $this->arResult["DELIVERY"][$deliveryObj->getId()];
+
+				$arDelivery['ID'] = $deliveryObj->getId();
+				$arDelivery['NAME'] = $deliveryObj->isProfile() ? $deliveryObj->getNameWithParent() : $deliveryObj->getName();
+				$arDelivery['OWN_NAME'] = $deliveryObj->getName();
+				$arDelivery['DESCRIPTION'] = $this->sanitize($deliveryObj->getDescription());
+				$arDelivery['FIELD_NAME'] = 'DELIVERY_ID';
+				$arDelivery["CURRENCY"] = $this->order->getCurrency();
+				$arDelivery['SORT'] = $deliveryObj->getSort();
+				$arDelivery['EXTRA_SERVICES'] = $deliveryObj->getExtraServices()->getItems();
+				$arDelivery['STORE'] = Delivery\ExtraServices\Manager::getStoresList($deliveryObj->getId());
+
+				if (intval($deliveryObj->getLogotip()) > 0)
+					$arDelivery["LOGOTIP"] = CFile::GetFileArray($deliveryObj->getLogotip());
+
+				if (!empty($arDelivery['STORE']) && is_array($arDelivery['STORE']))
+				{
+					foreach ($arDelivery['STORE'] as $val)
+						$arStoreId[$val] = $val;
+				}
+
+				$buyerStore = $this->request->get('BUYER_STORE');
+				if (!empty($buyerStore) && !empty($arDelivery['STORE']) && is_array($arDelivery['STORE']) && in_array($buyerStore, $arDelivery['STORE']))
+				{
+					$this->arUserResult['DELIVERY_STORE'] = $arDelivery["ID"];
+				}
+			}
+		}
+
+		$arResult["BUYER_STORE"] = $shipment->getStoreId();
+
+		$arStore = [];
+		$dbList = CCatalogStore::GetList(
+			["SORT" => "DESC", "ID" => "DESC"],
+			["ACTIVE" => "Y", "ID" => $arStoreId, "ISSUING_CENTER" => "Y", "+SITE_ID" => $this->getSiteId()],
+			false,
+			false,
+			["ID", "TITLE", "ADDRESS", "DESCRIPTION", "IMAGE_ID", "PHONE", "SCHEDULE", "GPS_N", "GPS_S", "ISSUING_CENTER", "SITE_ID"]
+		);
+		while ($arStoreTmp = $dbList->Fetch())
+		{
+			if ($arStoreTmp["IMAGE_ID"] > 0)
+				$arStoreTmp["IMAGE_ID"] = CFile::GetFileArray($arStoreTmp["IMAGE_ID"]);
+			else
+				$arStoreTmp["IMAGE_ID"] = null;
+
+			$arStore[$arStoreTmp["ID"]] = $arStoreTmp;
+		}
+
+		$arResult["STORE_LIST"] = $arStore;
+
+		$arResult["DELIVERY_EXTRA"] = [];
+		$deliveryExtra = $this->request->get('DELIVERY_EXTRA');
+		if (is_array($deliveryExtra) && !empty($deliveryExtra[$this->arUserResult["DELIVERY_ID"]]))
+			$arResult["DELIVERY_EXTRA"] = $deliveryExtra[$this->arUserResult["DELIVERY_ID"]];
+
+		$this->executeEvent('OnSaleComponentOrderOneStepDelivery', $this->order);
+	}
+
+	/**
+	 * Set pay system data from inner/external payment object and pay system services object to $this->arResult
+	 * Execution of 'OnSaleComponentOrderOneStepPaySystem' event
+	 */
+	protected function obtainPaySystem()
+	{
+		$arResult =& $this->arResult;
+
+		$innerPayment = $this->getInnerPayment($this->order);
+		if (!empty($innerPayment) && $innerPayment->getSum() > 0)
+		{
+			$arResult['PAYED_FROM_ACCOUNT_FORMATED'] = SaleFormatCurrency($innerPayment->getSum(), $this->order->getCurrency());
+			$arResult['ORDER_TOTAL_LEFT_TO_PAY'] = $this->order->getPrice() - $innerPayment->getSum();
+			$arResult['ORDER_TOTAL_LEFT_TO_PAY_FORMATED'] = SaleFormatCurrency($this->order->getPrice() - $innerPayment->getSum(), $this->order->getCurrency());
+		}
+
+		$paySystemList = $this->arParams['DELIVERY_TO_PAYSYSTEM'] === 'p2d' ? $this->arActivePaySystems : $this->arPaySystemServiceAll;
+		if (!empty($paySystemList))
+		{
+			$innerPaySystemId = PaySystem\Manager::getInnerPaySystemId();
+
+			if (!empty($paySystemList[$innerPaySystemId]))
+			{
+				$innerPaySystem = $paySystemList[$innerPaySystemId];
+
+				if ($innerPaySystem['LOGOTIP'] > 0)
+				{
+					$innerPaySystem['LOGOTIP'] = CFile::GetFileArray($innerPaySystem['LOGOTIP']);
+				}
+
+				$innerPaySystem['DESCRIPTION'] = $this->sanitize((string)$innerPaySystem['DESCRIPTION']);
+
+				$arResult['INNER_PAY_SYSTEM'] = $innerPaySystem;
+				unset($paySystemList[$innerPaySystemId]);
+			}
+
+			$extPayment = $this->getExternalPayment($this->order);
+			$paymentId = !empty($extPayment) ? $extPayment->getPaymentSystemId() : null;
+
+			foreach ($paySystemList as $paySystem)
+			{
+				$paySystem['PSA_ID'] = $paySystem['ID'];
+
+				if ((string)$paySystem['PSA_NAME'] === '')
+				{
+					$paySystem['PSA_NAME'] = $paySystem['NAME'];
+				}
+
+				$paySystem['PSA_NAME'] = htmlspecialcharsEx($paySystem['PSA_NAME']);
+
+				$keyMap = [
+					'ACTION_FILE', 'RESULT_FILE', 'NEW_WINDOW', 'PERSON_TYPE_ID', 'PARAMS', 'TARIF', 'HAVE_PAYMENT',
+					'HAVE_ACTION', 'HAVE_RESULT', 'HAVE_PREPAY', 'HAVE_RESULT_RECEIVE', 'ENCODING',
+				];
+				foreach ($keyMap as $key)
+				{
+					$paySystem["PSA_{$key}"] = $paySystem[$key];
+					unset($paySystem[$key]);
+				}
+
+				if ($paySystem['LOGOTIP'] > 0)
+				{
+					$paySystem['PSA_LOGOTIP'] = CFile::GetFileArray($paySystem['LOGOTIP']);
+				}
+				unset($paySystem['LOGOTIP']);
+
+				if ($paymentId == $paySystem['ID'])
+				{
+					$paySystem['CHECKED'] = 'Y';
+				}
+
+				$paySystem['PRICE'] = 0;
+				if ($paySystem['HAVE_PRICE'] === 'Y' && !empty($extPayment))
+				{
+					$service = PaySystem\Manager::getObjectById($paySystem['ID']);
+					if ($service !== null)
+					{
+						$paySystem['PRICE'] = $service->getPaymentPrice($extPayment);
+						$paySystem['PRICE_FORMATTED'] = SaleFormatCurrency($paySystem['PRICE'], $this->order->getCurrency());
+
+						if ($paymentId == $paySystem['ID'])
+						{
+							$arResult['PAY_SYSTEM_PRICE'] = $extPayment->getField('PRICE_COD');
+							$arResult['PAY_SYSTEM_PRICE_FORMATTED'] = SaleFormatCurrency($arResult['PAY_SYSTEM_PRICE'], $this->order->getCurrency());
+						}
+					}
+				}
+
+				$paySystem['DESCRIPTION'] = $this->sanitize((string)$paySystem['DESCRIPTION']);
+
+				$arResult['PAY_SYSTEM'][] = $paySystem;
+			}
+		}
+
+		$this->executeEvent('OnSaleComponentOrderOneStepPaySystem', $this->order);
+	}
+
+	/**
+	 * Set related to payment/delivery order properties data from order object to $this->arResult
+	 *
+	 * @throws Main\ObjectNotFoundException
+	 */
+	protected function obtainRelatedProperties()
+	{
+		$arRes = [];
+		$arProps = $this->order->getPropertyCollection()->getArray();
+
+		foreach ($arProps['properties'] as $key => $property)
+		{
+			if ($property['UTIL'] == 'Y')
+				continue;
+
+			if (!empty($property['RELATION']))
+			{
+				if (!empty($this->arResult['PERSON_TYPE'][$property['PERSON_TYPE_ID']]))
+				{
+					$personType = $this->arResult['PERSON_TYPE'][$property['PERSON_TYPE_ID']];
+					$property['PERSON_TYPE_LID'] = $personType['ID'];
+					$property['PERSON_TYPE_NAME'] = $personType['NAME'];
+					$property['PERSON_TYPE_SORT'] = $personType['SORT'];
+					$property['PERSON_TYPE_ACTIVE'] = $personType['ACTIVE'];
+				}
+
+				foreach ($arProps['groups'] as $group)
+				{
+					if ($group['ID'] == $property['PROPS_GROUP_ID'])
+					{
+						$property['GROUP_NAME'] = $group['NAME'];
+						$property['GROUP_ID'] = $group['ID'];
+						$property['GROUP_PERSON_TYPE_ID'] = $group['PERSON_TYPE_ID'];
+						break;
+					}
+				}
+
+				$property['SETTINGS'] = [
+					'MINLENGTH' => $property['MINLENGTH'],
+					'MAXLENGTH' => $property['MAXLENGTH'],
+					'PATTERN' => $property['PATTERN'],
+					'MULTILINE' => $property['MULTILINE'],
+					'SIZE' => $property['SIZE'],
+				];
+				$property['PAYSYSTEM_ID'] = $property['ID'];
+				$property['DELIVERY_ID'] = $property['ID'];
+
+				$arRes[] = $this->getOrderPropFormatted($property);
+			}
+		}
+
+		$this->arResult["ORDER_PROP"]["RELATED"] = $arRes;
+	}
+
+	/**
+	 * Set taxes data from order object to $this->arResult
+	 */
+	protected function obtainTaxes()
+	{
+		$arResult =& $this->arResult;
+
+		$arResult["USE_VAT"] = $this->order->isUsedVat();
+		$arResult["VAT_RATE"] = $this->order->getVatRate();
+		$arResult["VAT_SUM"] = $this->order->getVatSum();
+
+		if ($arResult["VAT_SUM"] === null)
+			$arResult["VAT_SUM"] = 0;

@@ -1,0 +1,500 @@
+				reset($this->arPaySystemServiceAll);
+
+				if (key($this->arPaySystemServiceAll) == $innerPaySystemId)
+				{
+					if (count($this->arPaySystemServiceAll) > 1)
+					{
+						next($this->arPaySystemServiceAll);
+					}
+					elseif ($sumToSpend > 0)
+					{
+						$extPayment->delete();
+						$extPayment = null;
+
+						/** @var Payment $innerPayment */
+						$innerPayment = $this->getInnerPayment($order);
+						if (empty($innerPayment))
+						{
+							$innerPayment = $paymentCollection->getInnerPayment();
+							if (!$innerPayment)
+							{
+								$innerPayment = $paymentCollection->createInnerPayment();
+							}
+						}
+
+						$sumToPay = $remainingSum > $sumToSpend ? $sumToSpend : $remainingSum;
+						$innerPayment->setField('SUM', $sumToPay);
+
+						if ($order->getPrice() - $paymentCollection->getSum() > 0)
+						{
+							$this->addWarning(Loc::getMessage('INNER_PAYMENT_BALANCE_ERROR'), self::PAY_SYSTEM_BLOCK);
+
+							$r = new Result();
+							$r->addError(new Sale\ResultWarning(
+								Loc::getMessage('INNER_PAYMENT_BALANCE_ERROR'),
+								'SALE_INNER_PAYMENT_BALANCE_ERROR'
+							));
+
+							Sale\EntityMarker::addMarker($order, $innerPayment, $r);
+							$innerPayment->setField('MARKED', 'Y');
+						}
+					}
+					else
+					{
+						unset($this->arActivePaySystems[$innerPaySystemId]);
+						unset($this->arPaySystemServiceAll[$innerPaySystemId]);
+					}
+				}
+
+				$selectedPaySystem = current($this->arPaySystemServiceAll);
+
+				if (!empty($selectedPaySystem) && $extPaySystemId != 0)
+				{
+					$this->addWarning(Loc::getMessage('PAY_SYSTEM_CHANGE_WARNING'), self::PAY_SYSTEM_BLOCK);
+				}
+			}
+
+			if (!array_key_exists((int)$selectedPaySystem['ID'], $this->arPaySystemServiceAll))
+			{
+				$this->addError(Loc::getMessage('P2D_CALCULATE_ERROR'), self::PAY_SYSTEM_BLOCK);
+				$this->addError(Loc::getMessage('P2D_CALCULATE_ERROR'), self::DELIVERY_BLOCK);
+			}
+
+			if (!empty($selectedPaySystem))
+			{
+				if ($selectedPaySystem['ID'] != $innerPaySystemId)
+				{
+					$codSum = 0;
+					$service = PaySystem\Manager::getObjectById($selectedPaySystem['ID']);
+					if ($service !== null)
+					{
+						$codSum = $service->getPaymentPrice($extPayment);
+					}
+
+					$extPayment->setFields([
+						'PAY_SYSTEM_ID' => $selectedPaySystem['ID'],
+						'PAY_SYSTEM_NAME' => $selectedPaySystem['NAME'],
+						'PRICE_COD' => $codSum,
+					]);
+
+					$this->arUserResult['PAY_SYSTEM_ID'] = $selectedPaySystem['ID'];
+				}
+			}
+			elseif (!empty($extPayment))
+			{
+				$extPayment->delete();
+				$extPayment = null;
+			}
+
+			if (!empty($this->arUserResult['PREPAYMENT_MODE']))
+			{
+				$this->showOnlyPrepaymentPs($this->arUserResult['PAY_SYSTEM_ID']);
+			}
+		}
+
+		if (!empty($innerPayment) && !empty($extPayment) && $remainingSum == 0)
+		{
+			$extPayment->delete();
+			$extPayment = null;
+		}
+	}
+
+	/**
+	 * Calculates all available deliveries for order object.
+	 * Uses cloned order not to harm real order.
+	 * Execution of 'OnSaleComponentOrderDeliveriesCalculated' event
+	 *
+	 * @param Order $order
+	 * @throws Main\NotSupportedException
+	 */
+	protected function calculateDeliveries(Order $order)
+	{
+		$this->arResult['DELIVERY'] = [];
+
+		if (!empty($this->arDeliveryServiceAll))
+		{
+			/** @var Order $orderClone */
+			$orderClone = null;
+			$anotherDeliveryCalculated = false;
+			/** @var Shipment $shipment */
+			$shipment = $this->getCurrentShipment($order);
+
+			foreach ($this->arDeliveryServiceAll as $deliveryId => $deliveryObj)
+			{
+				$calcResult = false;
+				$calcOrder = false;
+				$arDelivery = [];
+
+				if ((int)$shipment->getDeliveryId() === $deliveryId)
+				{
+					$arDelivery['CHECKED'] = 'Y';
+					$mustBeCalculated = true;
+					$calcResult = $deliveryObj->calculate($shipment);
+					$calcOrder = $order;
+				}
+				else
+				{
+					$mustBeCalculated = $this->arParams['DELIVERY_NO_AJAX'] === 'Y'
+						|| ($this->arParams['DELIVERY_NO_AJAX'] === 'H' && $deliveryObj->isCalculatePriceImmediately());
+
+					if ($mustBeCalculated)
+					{
+						$anotherDeliveryCalculated = true;
+
+						if (empty($orderClone))
+						{
+							$orderClone = $this->getOrderClone($order);
+						}
+
+						$orderClone->isStartField();
+
+						$clonedShipment = $this->getCurrentShipment($orderClone);
+						$clonedShipment->setField('DELIVERY_ID', $deliveryId);
+
+						$calculationResult = $orderClone->getShipmentCollection()->calculateDelivery();
+						if ($calculationResult->isSuccess())
+						{
+							$calcDeliveries = $calculationResult->get('CALCULATED_DELIVERIES');
+							$calcResult = reset($calcDeliveries);
+						}
+						else
+						{
+							$calcResult = new Delivery\CalculationResult();
+							$calcResult->addErrors($calculationResult->getErrors());
+						}
+
+						$orderClone->doFinalAction(true);
+
+						$calcOrder = $orderClone;
+					}
+				}
+
+				if ($mustBeCalculated)
+				{
+					if ($calcResult->isSuccess())
+					{
+						$arDelivery['PRICE'] = Sale\PriceMaths::roundPrecision($calcResult->getPrice());
+						$arDelivery['PRICE_FORMATED'] = SaleFormatCurrency($arDelivery['PRICE'], $calcOrder->getCurrency());
+
+						$currentCalcDeliveryPrice = Sale\PriceMaths::roundPrecision($calcOrder->getDeliveryPrice());
+						if ($currentCalcDeliveryPrice >= 0 && $arDelivery['PRICE'] != $currentCalcDeliveryPrice)
+						{
+							$arDelivery['DELIVERY_DISCOUNT_PRICE'] = $currentCalcDeliveryPrice;
+							$arDelivery['DELIVERY_DISCOUNT_PRICE_FORMATED'] = SaleFormatCurrency($arDelivery['DELIVERY_DISCOUNT_PRICE'], $calcOrder->getCurrency());
+						}
+
+						if ($calcResult->getPeriodDescription() <> '')
+						{
+							$arDelivery['PERIOD_TEXT'] = $calcResult->getPeriodDescription();
+						}
+					}
+					else
+					{
+						if (count($calcResult->getErrorMessages()) > 0)
+						{
+							foreach ($calcResult->getErrorMessages() as $message)
+							{
+								$arDelivery['CALCULATE_ERRORS'] .= $message.'<br>';
+							}
+						}
+						else
+						{
+							$arDelivery['CALCULATE_ERRORS'] = Loc::getMessage('SOA_DELIVERY_CALCULATE_ERROR');
+						}
+					}
+
+					$arDelivery['CALCULATE_DESCRIPTION'] = $calcResult->getDescription();
+				}
+
+				$this->arResult['DELIVERY'][$deliveryId] = $arDelivery;
+			}
+
+			// for discounts: last delivery calculation need to be on real order with selected delivery
+			if ($anotherDeliveryCalculated)
+			{
+				$order->doFinalAction(true);
+			}
+		}
+
+		$eventParameters = [
+			$order, &$this->arUserResult, $this->request,
+			&$this->arParams, &$this->arResult, &$this->arDeliveryServiceAll, &$this->arPaySystemServiceAll,
+		];
+		foreach (GetModuleEvents('sale', 'OnSaleComponentOrderDeliveriesCalculated', true) as $arEvent)
+		{
+			ExecuteModuleEventEx($arEvent, $eventParameters);
+		}
+	}
+
+	/**
+	 * @param Order $order
+	 *
+	 * @return Order
+	 */
+	protected function getOrderClone(Order $order)
+	{
+		/** @var Order $orderClone */
+		$orderClone = $order->createClone();
+
+		$clonedShipment = $this->getCurrentShipment($orderClone);
+		if (!empty($clonedShipment))
+		{
+			$clonedShipment->setField('CUSTOM_PRICE_DELIVERY', 'N');
+		}
+
+		return $orderClone;
+	}
+
+	/**
+	 * Set specific order fields and user description.
+	 *
+	 * @param Order $order
+	 * @throws Main\ObjectNotFoundException
+	 */
+	protected function initOrderFields(Order $order)
+	{
+		$order->setField("USER_DESCRIPTION", $this->arUserResult['ORDER_DESCRIPTION']);
+		$order->setField('COMPANY_ID', Company\Manager::getAvailableCompanyIdByEntity($order));
+
+		if ($order->getField('COMPANY_ID') > 0)
+		{
+			$responsibleGroups = Sale\Internals\CompanyResponsibleGroupTable::getCompanyGroups($order->getField('COMPANY_ID'));
+			if (!empty($responsibleGroups) && is_array($responsibleGroups))
+			{
+				$usersList = [];
+
+				foreach ($responsibleGroups as $groupId)
+				{
+					$usersList[] = CGroup::GetGroupUser($groupId);
+				}
+
+				$usersList = array_merge(...$usersList);
+
+				if (!empty($usersList) && is_array($usersList))
+				{
+					$usersList = array_unique($usersList);
+					$responsibleUserId = $usersList[array_rand($usersList)];
+
+					/** @var Main\Entity\Event $event */
+					$event = new Main\Event('sale', 'OnSaleComponentBeforeOrderSetResponsibleUserId', [
+						'ENTITY' => $order,
+						'VALUE' => $responsibleUserId,
+					]);
+					$event->send();
+
+					if ($event->getResults())
+					{
+						$result = new Result();
+						/** @var Main\EventResult $eventResult */
+						foreach ($event->getResults() as $eventResult)
+						{
+							if ($eventResult->getType() == Main\EventResult::SUCCESS)
+							{
+								if ($eventResultData = $eventResult->getParameters())
+								{
+									if (isset($eventResultData['VALUE']) && $eventResultData['VALUE'] != $responsibleUserId)
+									{
+										$responsibleUserId = $eventResultData['VALUE'];
+									}
+								}
+							}
+						}
+					}
+
+					$order->setField('RESPONSIBLE_ID', $responsibleUserId);
+				}
+
+			}
+		}
+
+	}
+
+	/**
+	 * Ajax action - recalculate order and send JSON answer with data/errors
+	 */
+	protected function refreshOrderAjaxAction()
+	{
+		$this->ses_log_Step(1, "refreshOrderAjaxAction");
+		global $USER;
+
+		$error = false;
+		$this->request->set($this->request->get('order'));
+		if ($this->checkSession)
+		{
+			$this->order = $this->createOrder($USER->GetID() ? $USER->GetID() : CSaleUser::GetAnonymousUserID());
+			$this->prepareResultArray();
+			self::scaleImages($this->arResult['JS_DATA'], $this->arParams['SERVICES_IMAGES_SCALING']);
+		}
+		else
+			$error = Loc::getMessage('SESSID_ERROR');
+
+		$this->showAjaxAnswer([
+			'order' => $this->arResult['JS_DATA'],
+			'locations' => $this->arResult['LOCATIONS'],
+			'error' => $error,
+		]);
+	}
+
+	/**
+	 * Returns true if basket quantity list is equal to basket "before refresh" state
+	 *
+	 * @param Order $order
+	 * @return bool
+	 */
+	protected function checkOrderConsistency(Order $order)
+	{
+		return $this->getActualQuantityList($order->getBasket()) === $this->arUserResult['QUANTITY_LIST'];
+	}
+
+	/**
+	 * Ajax action - attempt to save order and send JSON answer with data/errors
+	 */
+	protected function saveOrderAjaxAction()
+	{
+		global $USER;
+
+		$arOrderRes = [];
+		if ($this->checkSession)
+		{
+			$this->isOrderConfirmed = true;
+			$saveToSession = false;
+			$needToRegister = $this->needToRegister();
+
+			if ($needToRegister)
+			{
+				[$userId, $saveToSession] = $this->autoRegisterUser();
+			}
+			else
+			{
+				$userId = $USER->GetID() ? $USER->GetID() : CSaleUser::GetAnonymousUserID();
+			}
+
+			$this->order = $this->createOrder($userId);
+
+			$isActiveUser = intval($userId) > 0 && $userId != CSaleUser::GetAnonymousUserID();
+
+			if ($isActiveUser && empty($this->arResult['ERROR']))
+			{
+				if (!$this->checkOrderConsistency($this->order))
+				{
+					$r = new Result();
+					$r->addError(new Sale\ResultWarning(
+						Loc::getMessage('ORDER_CONSISTENCY_CHANGED'),
+						'SALE_ORDER_CONSISTENCY_CHANGED_ERROR'
+					));
+
+					Sale\EntityMarker::addMarker($this->order, $this->order, $r);
+					$this->order->setField('MARKED', 'Y');
+				}
+
+				$this->saveOrder($saveToSession);
+
+				if (!$needToRegister && Loader::includeModule('crm'))
+				{
+					BuyerService::getInstance()->attachUserToBuyers($userId);
+				}
+			}
+
+			if (empty($this->arResult["ERROR"]))
+			{
+				$arOrderRes["REDIRECT_URL"] = $this->arParams["~CURRENT_PAGE"]."?ORDER_ID=".urlencode($this->arResult["ACCOUNT_NUMBER"]);
+				$arOrderRes["ID"] = $this->arResult["ACCOUNT_NUMBER"];
+			}
+			else
+			{
+				$arOrderRes['ERROR'] = $this->arResult['ERROR_SORTED'];
+			}
+		}
+		else
+		{
+			$arOrderRes["ERROR"]['MAIN'] = Loc::getMessage('SESSID_ERROR');
+		}
+
+		$this->showAjaxAnswer(['order' => $arOrderRes]);
+	}
+
+	/**
+	 * Ajax action - add coupon and if needed recalculate order with JSON answer
+	 */
+	protected function enterCouponAction()
+	{
+		$coupon = trim($this->request->get('coupon'));
+
+		if (!empty($coupon))
+		{
+			if (DiscountCouponsManager::add($coupon))
+			{
+				$this->refreshOrderAjaxAction();
+			}
+			else
+			{
+				$this->showAjaxAnswer($coupon);
+			}
+		}
+	}
+
+	/**
+	 * Ajax action - remove coupon and if needed recalculate order with JSON answer
+	 */
+	protected function removeCouponAction()
+	{
+		$coupon = htmlspecialchars_decode(trim($this->request->get('coupon')));
+
+		if (!empty($coupon))
+		{
+			$active = $this->isActiveCoupon($coupon);
+			DiscountCouponsManager::delete($coupon);
+
+			if ($active)
+			{
+				$this->refreshOrderAjaxAction();
+			}
+			else
+			{
+				$this->showAjaxAnswer($coupon);
+			}
+		}
+	}
+
+	/**
+	 * Execution of 'OnSaleComponentOrderShowAjaxAnswer' event
+	 *
+	 * @param $result
+	 */
+	protected function showAjaxAnswer($result)
+	{
+		global $APPLICATION;
+
+		foreach (GetModuleEvents("sale", 'OnSaleComponentOrderShowAjaxAnswer', true) as $arEvent)
+			ExecuteModuleEventEx($arEvent, [&$result]);
+
+		$APPLICATION->RestartBuffer();
+
+		if ($this->request->get('save') != 'Y')
+			header('Content-Type: application/json');
+
+		echo Json::encode($result);
+
+		CMain::FinalActions();
+		die();
+	}
+
+	public static function compareProperties($a, $b)
+	{
+		$sortA = intval($a['SORT']);
+		$sortB = intval($b['SORT']);
+		if ($sortA == $sortB)
+			return 0;
+
+		return ($sortA < $sortB) ? -1 : 1;
+	}
+
+	/**
+	 * Resize image depending on scale type
+	 *
+	 * @param array $item
+	 * @param        $imageKey
+	 * @param array $arImage
+	 * @param array $sizeAdaptive
+	 * @param array $sizeStandard
+	 * @param string $scale

@@ -1,0 +1,500 @@
+
+		return $order;
+	}
+
+	/**
+	 * Returns created order object based on user and request data.
+	 * Execution of 'OnSaleComponentOrderCreated' event.
+	 *
+	 * @param $userId
+	 * @return Order
+	 */
+	protected function getOrder($userId)
+	{
+		$this->ses_log_Step(4, "getOrder");
+		$registry = Sale\Registry::getInstance(Sale\Registry::REGISTRY_TYPE_ORDER);
+		/** @var Order $orderClassName */
+		$orderClassName = $registry->getOrderClassName();
+
+		$order = $orderClassName::create($this->getSiteId(), $userId);
+		$order->isStartField();
+
+		$this->initLastOrderData($order);
+
+		$order->setField('STATUS_ID', Sale\OrderStatus::getInitialStatus());
+
+		if ($this->arParams['USE_PREPAYMENT'] === 'Y')
+		{
+			$this->usePrepayment($order);
+		}
+
+		$isPersonTypeChanged = $this->initPersonType($order);
+
+		$this->initTradeBinding($order);
+		$this->initProperties($order, $isPersonTypeChanged);
+		$this->initBasket($order);
+
+		$taxes = $order->getTax();
+		$taxes->setDeliveryCalculate($this->arParams['COUNT_DELIVERY_TAX'] === 'Y');
+
+		$shipment = $this->initShipment($order);
+
+		$order->doFinalAction(true);
+
+		if ($this->arParams['DELIVERY_TO_PAYSYSTEM'] === 'd2p')
+		{
+			$this->initDelivery($shipment);
+			$this->initPayment($order);
+		}
+		else
+		{
+			$this->initPayment($order);
+			$this->initDelivery($shipment);
+		}
+
+		$this->initEntityCompanyIds($order);
+		$this->initOrderFields($order);
+
+		// initialization of related properties
+		$this->checkProperties($order, $isPersonTypeChanged);
+		$this->setOrderProperties($order);
+
+		$this->recalculatePayment($order);
+
+		$eventParameters = [
+			$order, &$this->arUserResult, $this->request,
+			&$this->arParams, &$this->arResult, &$this->arDeliveryServiceAll, &$this->arPaySystemServiceAll,
+		];
+		foreach (GetModuleEvents('sale', 'OnSaleComponentOrderCreated', true) as $arEvent)
+		{
+			ExecuteModuleEventEx($arEvent, $eventParameters);
+		}
+
+		// no need to calculate deliveries when order is saving
+		if ($this->action !== 'saveOrderAjax')
+		{
+			$this->calculateDeliveries($order);
+		}
+		$this->ses_log($order,"getOrder.txt");
+		return $order;
+	}
+
+	/**
+	 * Initializes companies for payment and shipment
+	 *
+	 * @param Order $order
+	 */
+	protected function initEntityCompanyIds(Order $order)
+	{
+		$paymentCollection = $order->getPaymentCollection();
+		if ($paymentCollection)
+		{
+			/** @var Payment $payment */
+			foreach ($paymentCollection as $payment)
+			{
+				if ($payment->isInner())
+					continue;
+
+				$payment->setField('COMPANY_ID', Company\Manager::getAvailableCompanyIdByEntity($payment));
+				if ($payment->getField('COMPANY_ID') > 0)
+				{
+					$responsibleGroups = Sale\Internals\CompanyResponsibleGroupTable::getCompanyGroups($payment->getField('COMPANY_ID'));
+					if (!empty($responsibleGroups) && is_array($responsibleGroups))
+					{
+						$usersList = [];
+
+						foreach ($responsibleGroups as $groupId)
+						{
+							$usersList[] = CGroup::GetGroupUser($groupId);
+						}
+
+						$usersList = array_merge(...$usersList);
+
+						if (!empty($usersList) && is_array($usersList))
+						{
+							$usersList = array_unique($usersList);
+							$responsibleUserId = $usersList[array_rand($usersList)];
+
+							/** @var Main\Entity\Event $event */
+							$event = new Main\Event('sale', 'OnSaleComponentBeforePaymentSetResponsibleUserId', [
+								'ENTITY' => $payment,
+								'VALUE' => $responsibleUserId,
+							]);
+							$event->send();
+
+							if ($event->getResults())
+							{
+								$result = new Result();
+								/** @var Main\EventResult $eventResult */
+								foreach ($event->getResults() as $eventResult)
+								{
+									if ($eventResult->getType() == Main\EventResult::SUCCESS)
+									{
+										if ($eventResultData = $eventResult->getParameters())
+										{
+											if (isset($eventResultData['VALUE']) && $eventResultData['VALUE'] != $responsibleUserId)
+											{
+												$responsibleUserId = $eventResultData['VALUE'];
+											}
+										}
+									}
+								}
+							}
+
+							$payment->setField('RESPONSIBLE_ID', $responsibleUserId);
+						}
+					}
+				}
+			}
+		}
+
+		$shipmentCollection = $order->getShipmentCollection();
+		if ($shipmentCollection)
+		{
+			/** @var Shipment $shipment */
+			foreach ($shipmentCollection as $shipment)
+			{
+				if ($shipment->isSystem())
+					continue;
+
+				$shipment->setField('COMPANY_ID', Company\Manager::getAvailableCompanyIdByEntity($shipment));
+
+				if ($shipment->getField('COMPANY_ID') > 0)
+				{
+					$responsibleGroups = Sale\Internals\CompanyResponsibleGroupTable::getCompanyGroups($shipment->getField('COMPANY_ID'));
+					if (!empty($responsibleGroups) && is_array($responsibleGroups))
+					{
+						$usersList = [];
+
+						foreach ($responsibleGroups as $groupId)
+						{
+							$usersList[] = CGroup::GetGroupUser($groupId);
+						}
+
+						$usersList = array_merge(...$usersList);
+
+						if (!empty($usersList) && is_array($usersList))
+						{
+							$usersList = array_unique($usersList);
+							$responsibleUserId = $usersList[array_rand($usersList)];
+
+							/** @var Main\Entity\Event $event */
+							$event = new Main\Event('sale', 'OnSaleComponentBeforeShipmentSetResponsibleUserId', [
+								'ENTITY' => $shipment,
+								'VALUE' => $responsibleUserId,
+							]);
+							$event->send();
+
+							if ($event->getResults())
+							{
+								$result = new Result();
+								/** @var Main\EventResult $eventResult */
+								foreach ($event->getResults() as $eventResult)
+								{
+									if ($eventResult->getType() == Main\EventResult::SUCCESS)
+									{
+										if ($eventResultData = $eventResult->getParameters())
+										{
+											if (isset($eventResultData['VALUE']) && $eventResultData['VALUE'] != $responsibleUserId)
+											{
+												$responsibleUserId = $eventResultData['VALUE'];
+											}
+										}
+									}
+								}
+							}
+
+							$shipment->setField('RESPONSIBLE_ID', $responsibleUserId);
+						}
+					}
+				}
+			}
+		}
+	}
+
+	protected function initTradeBinding(Order $order)
+	{
+		if (isset($this->arParams['CONTEXT_SITE_ID']) && $this->arParams['CONTEXT_SITE_ID'] > 0)
+		{
+			if (!Loader::includeModule('landing'))
+			{
+				return;
+			}
+
+			$code = \Bitrix\Sale\TradingPlatform\Landing\Landing::getCodeBySiteId($this->arParams['CONTEXT_SITE_ID']);
+
+			$platform = \Bitrix\Sale\TradingPlatform\Landing\Landing::getInstanceByCode($code);
+			if (!$platform->isInstalled())
+			{
+				return;
+			}
+
+			$collection = $order->getTradeBindingCollection();
+			$collection->createItem($platform);
+		}
+	}
+
+	/**
+	 * Prepares action string to execute in doAction
+	 *
+	 * refreshOrderAjax/saveOrderAjax - process/save order via JSON (new template)
+	 * enterCoupon/removeCoupon - add/delete coupons via JSON (new template)
+	 * showAuthForm - show authorization form (old/new templates)                 [including component template]
+	 * processOrder - process order (old(all hits)/new(first hit) templates) [including component template]
+	 * showOrder - show created order (old/new templates)                             [including component template]
+	 *
+	 * @return null|string
+	 */
+	protected function prepareAction()
+	{
+		global $USER;
+
+		$action = $this->request->offsetExists($this->arParams['ACTION_VARIABLE'])
+			? $this->request->get($this->arParams['ACTION_VARIABLE'])
+			: $this->request->get('action');
+
+		if (!$USER->IsAuthorized() && $this->arParams['ALLOW_AUTO_REGISTER'] === 'N' && $action !== 'confirmSmsCode')
+		{
+			$action = 'showAuthForm';
+		}
+
+		if (empty($action) || !$this->actionExists($action))
+		{
+			if ($this->request->get('ORDER_ID') == '')
+			{
+				$action = 'processOrder';
+			}
+			else
+			{
+				$action = 'showOrder';
+			}
+		}
+
+		return $action;
+	}
+
+	/**
+	 * Checks whether component implements selected action.
+	 *
+	 * @param $action
+	 * @return bool
+	 */
+	protected function actionExists($action)
+	{
+		return is_callable([$this, $action.'Action']);
+	}
+
+	/**
+	 * Executes prepared action with postfix 'Action'
+	 *
+	 * @param $action
+	 */
+	protected function doAction($action)
+	{
+		if ($this->actionExists($action))
+		{
+			$this->{$action.'Action'}();
+		}
+	}
+
+	protected function processOrderAction()
+	{
+		global $APPLICATION, $USER;
+
+		$arResult =& $this->arResult;
+		$this->isOrderConfirmed = $this->request->isPost()
+			&& $this->request->get("confirmorder") == 'Y'
+			&& $this->checkSession;
+
+		$saveToSession = false;
+
+		if ($this->isOrderConfirmed && $this->needToRegister())
+		{
+			[$userId, $saveToSession] = $this->autoRegisterUser();
+		}
+		else
+		{
+			$userId = $USER->GetID();
+		}
+
+		if (!$userId)
+		{
+			$userId = CSaleUser::GetAnonymousUserID();
+		}
+
+		$this->order = $this->createOrder($userId);
+		$this->prepareResultArray();
+
+		$isActiveUser = intval($userId) > 0 && $userId != CSaleUser::GetAnonymousUserID();
+		if ($this->isOrderConfirmed && $isActiveUser && empty($arResult["ERROR"]))
+		{
+			$this->saveOrder($saveToSession);
+
+			if (empty($arResult["ERROR"]))
+			{
+				$arResult["REDIRECT_URL"] = $APPLICATION->GetCurPageParam("ORDER_ID=".urlencode(urlencode($arResult["ACCOUNT_NUMBER"])), ["ORDER_ID"]);
+
+				if ($this->request['json'] == "Y" && ($this->isOrderConfirmed || $arResult["NEED_REDIRECT"] == "Y"))
+				{
+					$APPLICATION->RestartBuffer();
+					echo json_encode(["success" => "Y", "redirect" => $arResult["REDIRECT_URL"]]);
+					die();
+				}
+			}
+			else
+			{
+				$arResult["USER_VALS"]["CONFIRM_ORDER"] = "N";
+			}
+		}
+		else
+		{
+			$arResult["USER_VALS"]["CONFIRM_ORDER"] = "N";
+		}
+	}
+
+	/**
+	 * Action - show created order and payment info
+	 */
+	protected function showOrderAction()
+	{
+		global $USER;
+		$arResult =& $this->arResult;
+		$arOrder = false;
+		$arResult["USER_VALS"]["CONFIRM_ORDER"] = "Y";
+		$orderId = urldecode($this->request->get('ORDER_ID'));
+		$checkedBySession = false;
+
+		$registry = Sale\Registry::getInstance(Sale\Registry::REGISTRY_TYPE_ORDER);
+		/** @var Order $orderClassName */
+		$orderClassName = $registry->getOrderClassName();
+
+		/** @var Order $order */
+		if ($order = $orderClassName::loadByAccountNumber($orderId))
+		{
+			$arOrder = $order->getFieldValues();
+			$arResult["ORDER_ID"] = $arOrder["ID"];
+			$arResult["ACCOUNT_NUMBER"] = $arOrder["ACCOUNT_NUMBER"];
+			$arOrder["IS_ALLOW_PAY"] = $order->isAllowPay() ? 'Y' : 'N';
+			$checkedBySession = !empty($_SESSION['SALE_ORDER_ID']) && is_array($_SESSION['SALE_ORDER_ID'])
+				&& in_array(intval($order->getId()), $_SESSION['SALE_ORDER_ID']);
+		}
+
+		if (!empty($arOrder) && ($order->getUserId() == $USER->GetID() || $checkedBySession))
+		{
+			foreach (GetModuleEvents("sale", "OnSaleComponentOrderOneStepFinal", true) as $arEvent)
+				ExecuteModuleEventEx($arEvent, [$arResult["ORDER_ID"], &$arOrder, &$this->arParams]);
+
+			$arResult["PAYMENT"] = [];
+			if ($order->isAllowPay())
+			{
+				$paymentCollection = $order->getPaymentCollection();
+				/** @var Payment $payment */
+				foreach ($paymentCollection as $payment)
+				{
+					$arResult["PAYMENT"][$payment->getId()] = $payment->getFieldValues();
+
+					if (intval($payment->getPaymentSystemId()) > 0 && !$payment->isPaid())
+					{
+						$paySystemService = PaySystem\Manager::getObjectById($payment->getPaymentSystemId());
+						if (!empty($paySystemService))
+						{
+							$arPaySysAction = $paySystemService->getFieldsValues();
+
+							if ($paySystemService->getField('NEW_WINDOW') === 'N' || $paySystemService->getField('ID') == PaySystem\Manager::getInnerPaySystemId())
+							{
+								/** @var PaySystem\ServiceResult $initResult */
+								$initResult = $paySystemService->initiatePay($payment, null, PaySystem\BaseServiceHandler::STRING);
+								if ($initResult->isSuccess())
+								{
+									$arPaySysAction['BUFFERED_OUTPUT'] = $initResult->getTemplate();
+									$arPaySysAction['PAYMENT_URL'] = $initResult->getPaymentUrl();
+								}
+								else
+								{
+									$arPaySysAction["ERROR"] = $initResult->getErrorMessages();
+								}
+							}
+
+							$arResult["PAYMENT"][$payment->getId()]['PAID'] = $payment->getField('PAID');
+
+							$arOrder['PAYMENT_ID'] = $payment->getId();
+							$arOrder['PAY_SYSTEM_ID'] = $payment->getPaymentSystemId();
+							$arPaySysAction["NAME"] = htmlspecialcharsEx($arPaySysAction["NAME"]);
+							$arPaySysAction["IS_AFFORD_PDF"] = $paySystemService->isAffordPdf();
+
+							if ($arPaySysAction > 0)
+								$arPaySysAction["LOGOTIP"] = CFile::GetFileArray($arPaySysAction["LOGOTIP"]);
+
+							if ($this->arParams['COMPATIBLE_MODE'] == 'Y' && !$payment->isInner())
+							{
+								// compatibility
+								\CSalePaySystemAction::InitParamArrays($order->getFieldValues(), $order->getId(), '', [], $payment->getFieldValues());
+								$map = CSalePaySystemAction::getOldToNewHandlersMap();
+								$oldHandler = array_search($arPaySysAction["ACTION_FILE"], $map);
+								if ($oldHandler !== false && !$paySystemService->isCustom())
+									$arPaySysAction["ACTION_FILE"] = $oldHandler;
+
+								if ($arPaySysAction["ACTION_FILE"] <> '' && $arPaySysAction["NEW_WINDOW"] != "Y")
+								{
+									$pathToAction = Main\Application::getDocumentRoot().$arPaySysAction["ACTION_FILE"];
+
+									$pathToAction = str_replace("\\", "/", $pathToAction);
+									while (mb_substr($pathToAction, mb_strlen($pathToAction) - 1, 1) == "/")
+										$pathToAction = mb_substr($pathToAction, 0, mb_strlen($pathToAction) - 1);
+
+									if (file_exists($pathToAction))
+									{
+										if (is_dir($pathToAction) && file_exists($pathToAction."/payment.php"))
+											$pathToAction .= "/payment.php";
+
+										$arPaySysAction["PATH_TO_ACTION"] = $pathToAction;
+									}
+								}
+
+								$arResult["PAY_SYSTEM"] = $arPaySysAction;
+							}
+
+							$arResult["PAY_SYSTEM_LIST"][$payment->getPaymentSystemId()] = $arPaySysAction;
+							$arResult["PAY_SYSTEM_LIST_BY_PAYMENT_ID"][$payment->getId()] = $arPaySysAction;
+						}
+						else
+							$arResult["PAY_SYSTEM_LIST"][$payment->getPaymentSystemId()] = ['ERROR' => true];
+					}
+				}
+			}
+
+			$arResult["ORDER"] = $arOrder;
+		}
+		else
+			$arResult["ACCOUNT_NUMBER"] = $orderId;
+	}
+
+	/**
+	 * Action - saves order if there are no errors
+	 * Execution of 'OnSaleComponentOrderOneStepComplete' event
+	 *
+	 * @param bool $saveToSession
+	 */
+	protected function saveOrder($saveToSession = false)
+	{
+		$arResult =& $this->arResult;
+
+		$this->initStatGid();
+		$this->initAffiliate();
+
+		$res = $this->order->save();
+
+
+		if ($res->isSuccess())
+		{
+			$arResult["ORDER_ID"] = $res->getId();
+			$arResult["ACCOUNT_NUMBER"] = $this->order->getField('ACCOUNT_NUMBER');
+
+			if ($this->arParams['USER_CONSENT'] === 'Y')
+			{
+				Main\UserConsent\Consent::addByContext(
+					$this->arParams['USER_CONSENT_ID'], 'sale/order', $arResult['ORDER_ID']
+				);
+			}
+			//\Rtop\Exchange\Event::CustomSaleOrderSaved($arResult["ORDER_ID"], $this->request->get('APPLY_BONUSES'));
+			$fUserId = Sale\Fuser::getId();

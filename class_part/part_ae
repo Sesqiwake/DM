@@ -1,0 +1,500 @@
+	}
+
+	/**
+	 * @return array
+	 */
+	protected function getExternalUserTypes(): array
+	{
+		return array_diff(\Bitrix\Main\UserTable::getExternalUserTypes(), ['shop']);
+	}
+
+	/**
+	 * Returns array of user id and 'save to session' flag (true if 'unique user e-mails' option
+	 * active and we already have this e-mail)
+	 *
+	 * @return array
+	 * @throws Main\ArgumentNullException
+	 */
+	protected function autoRegisterUser()
+	{
+		$personType = $this->request->get('PERSON_TYPE');
+		if ($personType <= 0)
+		{
+			$personTypes = PersonType::load($this->context->getSite());
+			// $personTypes = PersonType::load($this->getSiteId());
+			foreach ($personTypes as $type)
+			{
+				$personType = $type['ID'];
+				break;
+			}
+
+			unset($personTypes, $type);
+		}
+
+		$userProps = Sale\PropertyValue::getMeaningfulValues($personType, $this->getPropertyValuesFromRequest());
+		$userId = false;
+		$saveToSession = false;
+
+		if (
+			$this->arParams['ALLOW_APPEND_ORDER'] === 'Y'
+			&& (
+				Option::get('main', 'new_user_email_uniq_check', '') === 'Y'
+				|| Option::get('main', 'new_user_phone_auth', '') === 'Y'
+			)
+			&& ($userProps['EMAIL'] != '' || $userProps['PHONE'] != '')
+		)
+		{
+			$existingUserId = 0;
+
+			if ($userProps['EMAIL'] != '')
+			{
+				$res = Bitrix\Main\UserTable::getRow([
+					'filter' => [
+						'=ACTIVE' => 'Y',
+						'=EMAIL' => $userProps['EMAIL'],
+						'!=EXTERNAL_AUTH_ID' => $this->getExternalUserTypes()
+					],
+					'select' => ['ID'],
+				]);
+				if (isset($res['ID']))
+				{
+					$existingUserId = (int)$res['ID'];
+				}
+			}
+
+			if ($existingUserId == 0 && !empty($userProps['PHONE']))
+			{
+				$normalizedPhone = $this->getNormalizedPhone($userProps['PHONE']);
+				$normalizedPhoneForRegistration = $this->getNormalizedPhoneForRegistration($userProps['PHONE']);
+
+				if (!empty($normalizedPhone))
+				{
+					$res = Bitrix\Main\UserTable::getRow([
+						'filter' => [
+							'ACTIVE' => 'Y',
+							'!=EXTERNAL_AUTH_ID' => $this->getExternalUserTypes(),
+							[
+								'LOGIC' => 'OR',
+								'=PHONE_AUTH.PHONE_NUMBER' => $normalizedPhoneForRegistration,
+								'=PERSONAL_PHONE' => $normalizedPhone,
+								'=PERSONAL_MOBILE' => $normalizedPhone,
+							],
+						],
+						'select' => ['ID'],
+					]);
+					if (isset($res['ID']))
+					{
+						$existingUserId = (int)$res['ID'];
+					}
+				}
+			}
+
+			if ($existingUserId > 0)
+			{
+				$userId = $existingUserId;
+				$saveToSession = true;
+
+				if ($this->arParams['IS_LANDING_SHOP'] === 'Y')
+				{
+					CUser::AppendUserGroup($userId, \Bitrix\Crm\Order\BuyerGroup::getDefaultGroups());
+				}
+			}
+			else
+			{
+				$userId = $this->registerAndLogIn($userProps);
+			}
+		}
+		elseif ($userProps['EMAIL'] != '' || Option::get('main', 'new_user_email_required', '') === 'N')
+		{
+			$userId = $this->registerAndLogIn($userProps);
+		}
+		else
+		{
+			$this->addError(Loc::getMessage('STOF_ERROR_EMAIL'), self::AUTH_BLOCK);
+		}
+
+		return [$userId, $saveToSession];
+	}
+
+	public function initGrid()
+	{
+		$this->arResult["GRID"]["HEADERS"] = $this->getGridHeaders($this->arParams["PRODUCT_COLUMNS"]);
+		$this->arResult["GRID"]["HEADERS_HIDDEN"] = $this->getGridHeaders($this->arParams["PRODUCT_COLUMNS_HIDDEN"]);
+	}
+
+	public function getGridHeaders($productColumns)
+	{
+		$arr = [];
+
+		if (is_array($productColumns) && !empty($productColumns))
+		{
+			$arCodes = [];
+			$iBlockProps = [];
+			foreach ($productColumns as $key => $value) // making grid headers array
+			{
+				if (strncmp($value, "PROPERTY_", 9) == 0)
+				{
+					$propCode = mb_substr($value, 9);
+
+					if ($propCode == '')
+						continue;
+
+					$arCodes[] = $propCode;
+				}
+			}
+
+			if ($this->useCatalog && !empty($arCodes))
+			{
+				$iBlockList = [];
+				$catalogIterator = Bitrix\Catalog\CatalogIblockTable::getList([
+					'select' => ['IBLOCK_ID', 'PRODUCT_IBLOCK_ID', 'SITE_ID' => 'IBLOCK_SITE.SITE_ID'],
+					'filter' => ['SITE_ID' => $this->getSiteId()],
+					'runtime' => [
+						'IBLOCK_SITE' => [
+							'data_type' => 'Bitrix\Iblock\IblockSiteTable',
+							'reference' => [
+								'ref.IBLOCK_ID' => 'this.IBLOCK_ID',
+							],
+							'join_type' => 'inner',
+						],
+					],
+				]);
+				while ($catalog = $catalogIterator->fetch())
+				{
+					$iBlockList[$catalog['IBLOCK_ID']] = $catalog['IBLOCK_ID'];
+
+					if (intval($catalog['PRODUCT_IBLOCK_ID']) > 0)
+						$iBlockList[$catalog['PRODUCT_IBLOCK_ID']] = $catalog['PRODUCT_IBLOCK_ID'];
+				}
+
+				if (!empty($iBlockList))
+				{
+					$propertyIterator = Bitrix\Iblock\PropertyTable::getList([
+						'select' => ['ID', 'IBLOCK_ID', 'NAME', 'ACTIVE', 'SORT', 'CODE', 'TIMESTAMP_X',
+							'DEFAULT_VALUE', 'PROPERTY_TYPE', 'ROW_COUNT', 'COL_COUNT', 'LIST_TYPE',
+							'MULTIPLE', 'XML_ID', 'FILE_TYPE', 'MULTIPLE_CNT', 'LINK_IBLOCK_ID', 'WITH_DESCRIPTION',
+							'SEARCHABLE', 'FILTRABLE', 'IS_REQUIRED', 'VERSION', 'USER_TYPE', 'USER_TYPE_SETTINGS', 'HINT'],
+						'filter' => [
+							'@IBLOCK_ID' => array_keys($iBlockList),
+							'=ACTIVE' => 'Y',
+							'@CODE' => $arCodes,
+						],
+						'order' => ['SORT' => 'ASC', 'ID' => 'ASC'],
+					]);
+					while ($property = $propertyIterator->fetch())
+					{
+						$this->arIblockProps[$property['IBLOCK_ID']][$property['CODE']] = $property;
+
+						if (!isset($iBlockProps[$property['CODE']]))
+							$iBlockProps[$property['CODE']] = $property;
+					}
+				}
+			}
+
+			// making grid headers array
+			foreach ($productColumns as $key => $value)
+			{
+				// processing iblock properties
+				if (strncmp($value, "PROPERTY_", 9) == 0)
+				{
+					$propCode = mb_substr($value, 9);
+
+					if ($propCode == '')
+						continue;
+
+					// array of iblock properties to select
+					$this->arCustomSelectFields[] = $value;
+					$id = $value."_VALUE";
+					$name = $value;
+
+					if (array_key_exists($propCode, $iBlockProps))
+					{
+						$name = $iBlockProps[$propCode]["NAME"];
+					}
+				}
+				else
+				{
+					$id = $key;
+					$name = $value;
+				}
+
+				$arColumn = [
+					"id" => $id,
+					"name" => $name,
+				];
+
+				if ($key == "PRICE_FORMATED")
+				{
+					$arColumn["align"] = "right";
+				}
+
+				$arr[] = $arColumn;
+			}
+		}
+
+		return $arr;
+	}
+
+	public function getPropsInfo($source)
+	{
+		$resultHTML = "";
+
+		foreach ($source["PROPS"] as $val)
+		{
+			$resultHTML .= str_replace(" ", "&nbsp;", $val["NAME"].": ".$val["VALUE"])."<br />";
+		}
+
+		return $resultHTML;
+	}
+
+	public function getIblockProps($value, $propData, $arSize = ["WIDTH" => 90, "HEIGHT" => 90], $orderId = 0)
+	{
+		$res = [];
+
+		if ($propData["MULTIPLE"] == "Y")
+		{
+			$arVal = [];
+			if (!is_array($value))
+			{
+				if (mb_strpos($value, ",") !== false)
+					$arVal = explode(",", $value);
+				else
+					$arVal[] = $value;
+			}
+			else
+				$arVal = $value;
+
+			if (!empty($arVal))
+			{
+				foreach ($arVal as $key => $val)
+				{
+					if ($propData["PROPERTY_TYPE"] == "F")
+						$res[] = $this->getFileData(trim($val), $orderId, $arSize);
+					else
+						$res[] = ["type" => "value", "value" => $val];
+				}
+			}
+		}
+		else
+		{
+			if ($propData["PROPERTY_TYPE"] == "F")
+				$res[] = $this->getFileData($value, $orderId, $arSize);
+			else
+				$res[] = ["type" => "value", "value" => $value];
+		}
+
+		return $res;
+	}
+
+	public function getLinkedPropValue($basketItem, $property)
+	{
+		$result = [];
+
+		if ($property['MULTIPLE'] === 'Y')
+			$property['VALUE'] = explode(',', $property['VALUE']);
+
+		$formattedProperty = CIBlockFormatProperties::GetDisplayValue($basketItem, $property, 'sale_out');
+		if (!empty($formattedProperty['DISPLAY_VALUE']))
+		{
+			if (is_array($formattedProperty['DISPLAY_VALUE']))
+			{
+				foreach ($formattedProperty['DISPLAY_VALUE'] as $key => $formatValue)
+				{
+					$result[] = [
+						'type' => 'linked',
+						'value' => $property['VALUE'][$key],
+						'value_format' => $formatValue,
+					];
+				}
+			}
+			else
+			{
+				$result[] = [
+					'type' => 'linked',
+					'value' => is_array($property['VALUE']) ? reset($property['VALUE']) : $property['VALUE'],
+					'value_format' => $formattedProperty['DISPLAY_VALUE'],
+				];
+			}
+		}
+
+		return $result;
+	}
+
+	public function getDirectoryProperty($basketItem, $property)
+	{
+		$result = [];
+
+		if ($property['MULTIPLE'] === 'Y')
+		{
+			$property['VALUE'] = explode(', ', $basketItem['PROPERTY_'.$property['CODE'].'_VALUE']);
+		}
+		else
+		{
+			$property['VALUE'] = $basketItem['PROPERTY_'.$property['CODE'].'_VALUE'];
+		}
+
+		$property['~VALUE'] = $property['VALUE'];
+
+		if (CheckSerializedData($property['USER_TYPE_SETTINGS']))
+		{
+			$property['USER_TYPE_SETTINGS'] = unserialize($property['USER_TYPE_SETTINGS'], ['allowed_classes' => false]);
+		}
+
+		$formattedProperty = CIBlockFormatProperties::GetDisplayValue($basketItem, $property, 'sale_out');
+		if (!empty($formattedProperty['DISPLAY_VALUE']))
+		{
+			if (is_array($formattedProperty['DISPLAY_VALUE']))
+			{
+				foreach ($formattedProperty['DISPLAY_VALUE'] as $key => $formatValue)
+				{
+					$result[] = [
+						'type' => 'value',
+						'value' => $formatValue,
+						'value_raw' => $property['VALUE'][$key],
+					];
+				}
+			}
+			else
+			{
+				$result[] = [
+					'type' => 'value',
+					'value' => $formattedProperty['DISPLAY_VALUE'],
+					'value_raw' => is_array($property['VALUE']) ? reset($property['VALUE']) : $property['VALUE'],
+				];
+			}
+		}
+
+		return $result;
+	}
+
+	public function getFileData($fileId, $orderId = 0, $arSize = ["WIDTH" => 90, "HEIGHT" => 90])
+	{
+		$res = "";
+		$arFile = CFile::GetFileArray($fileId);
+
+		if ($arFile)
+		{
+			$is_image = CFile::IsImage($arFile["FILE_NAME"], $arFile["CONTENT_TYPE"]);
+			if ($is_image)
+			{
+				$arImgProduct = CFile::ResizeImageGet($arFile, ["width" => $arSize["WIDTH"], "height" => $arSize["HEIGHT"]], BX_RESIZE_IMAGE_PROPORTIONAL, false, false);
+
+				if (is_array($arImgProduct))
+					$res = ["type" => "image", "value" => $arImgProduct["src"], "source" => $arFile["SRC"]];
+			}
+			else
+				$res = ["type" => "file", "value" => "<a href=".$arFile["SRC"].">".$arFile["ORIGINAL_NAME"]."</a>"];
+		}
+
+		return $res;
+	}
+
+	private function sanitize(string $html): string
+	{
+		static $sanitizer = null;
+
+		if ($sanitizer === null)
+		{
+			$sanitizer = new \CBXSanitizer;
+			$sanitizer->setLevel(\CBXSanitizer::SECURE_LEVEL_LOW);
+		}
+
+		return $sanitizer->sanitizeHtml($html);
+	}
+
+	/**
+	 * Set formatted order properties to $this->arResult (heavy load due to compatibility)
+	 * Execution of 'OnSaleComponentOrderOneStepOrderProps' event
+	 */
+	protected function obtainFormattedProperties()
+	{
+		$arResult =& $this->arResult;
+		$arDeleteFieldLocation = [];
+		$propIndex = [];
+		$arOrderProps = $this->order->getPropertyCollection()->getArray();
+		$propsSortedByGroup = [];
+		foreach ($arOrderProps['groups'] as $group)
+		{
+			foreach ($arOrderProps['properties'] as $prop)
+			{
+				if ($prop['UTIL'] == 'Y' || !empty($prop['RELATION']))
+					continue;
+
+				if ($group['ID'] == $prop['PROPS_GROUP_ID'])
+				{
+					$prop['GROUP_NAME'] = $group['NAME'];
+					$propsSortedByGroup[] = $prop;
+				}
+			}
+		}
+
+		foreach ($propsSortedByGroup as $arProperty)
+		{
+			$arProperties = $this->getOrderPropFormatted($arProperty, $arDeleteFieldLocation);
+
+			$flag = $arProperties["USER_PROPS"] == "Y" ? 'Y' : 'N';
+
+			$arResult["ORDER_PROP"]["USER_PROPS_".$flag][$arProperties["ID"]] = $arProperties;
+			$propIndex[$arProperties["ID"]] =& $arResult["ORDER_PROP"]["USER_PROPS_".$flag][$arProperties["ID"]];
+
+			$arResult["ORDER_PROP"]["PRINT"][$arProperties["ID"]] = [
+				"ID" => $arProperties["ID"],
+				"NAME" => $arProperties["NAME"],
+				"VALUE" => $arProperties["VALUE_FORMATED"],
+				"SHOW_GROUP_NAME" => $arProperties["SHOW_GROUP_NAME"],
+			];
+		}
+
+		// additional city property process
+		foreach ($propIndex as $propId => $propDesc)
+		{
+			if (intval($propDesc['INPUT_FIELD_LOCATION']) && isset($propIndex[$propDesc['INPUT_FIELD_LOCATION']]))
+			{
+				$propIndex[$propDesc['INPUT_FIELD_LOCATION']]['IS_ALTERNATE_LOCATION_FOR'] = $propId;
+				$propIndex[$propId]['CAN_HAVE_ALTERNATE_LOCATION'] = $propDesc['INPUT_FIELD_LOCATION']; // more strict condition rather INPUT_FIELD_LOCATION, check if the property really exists
+			}
+		}
+
+		//delete prop for text location (town)
+		if (count($arDeleteFieldLocation) > 0)
+		{
+			foreach ($arDeleteFieldLocation as $fieldId)
+				unset($arResult["ORDER_PROP"]["USER_PROPS_Y"][$fieldId]);
+		}
+
+		$this->executeEvent('OnSaleComponentOrderOneStepOrderProps', $this->order);
+	}
+
+	protected function getOrderPropFormatted($arProperty, &$arDeleteFieldLocation = [])
+	{
+		static $propertyGroupID = 0;
+		static $propertyUSER_PROPS = '';
+
+		$arProperty['FIELD_NAME'] = 'ORDER_PROP_'.$arProperty['ID'];
+
+		if ($arProperty['CODE'] != '')
+		{
+			$arProperty['FIELD_ID'] = 'ORDER_PROP_'.$arProperty['CODE'];
+		}
+		else
+		{
+			$arProperty['FIELD_ID'] = 'ORDER_PROP_'.$arProperty['ID'];
+		}
+
+		if (intval($arProperty['PROPS_GROUP_ID']) != $propertyGroupID || $propertyUSER_PROPS != $arProperty['USER_PROPS'])
+		{
+			$arProperty['SHOW_GROUP_NAME'] = 'Y';
+		}
+
+		$propertyGroupID = $arProperty['PROPS_GROUP_ID'];
+		$propertyUSER_PROPS = $arProperty['USER_PROPS'];
+
+		if ($arProperty['REQUIRED'] === 'Y' || $arProperty['IS_PROFILE_NAME'] === 'Y'
+			|| $arProperty['IS_LOCATION'] === 'Y' || $arProperty['IS_LOCATION4TAX'] === 'Y'
+			|| $arProperty['IS_PAYER'] === 'Y' || $arProperty['IS_ZIP'] === 'Y')
+		{
+			$arProperty['REQUIED'] = 'Y';
+			$arProperty['REQUIED_FORMATED'] = 'Y';
+		}
+
+		if ($arProperty['IS_LOCATION'] === 'Y')

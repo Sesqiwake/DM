@@ -1,0 +1,500 @@
+
+		$arResult["VAT_SUM_FORMATED"] = SaleFormatCurrency($arResult["VAT_SUM"], $this->order->getCurrency());
+
+		$taxes = $this->order->getTax();
+		$taxes->refreshData();
+
+		if ($this->order->isUsedVat())
+		{
+			if ($this->arParams['SHOW_VAT_PRICE'] === 'Y')
+			{
+				$arResult['TAX_LIST'] = $taxes->getAvailableList();
+			}
+		}
+		else
+		{
+			$arResult['TAX_LIST'] = $taxes->getTaxList();
+			if (is_array($arResult['TAX_LIST']) && !empty($arResult['TAX_LIST']))
+			{
+				foreach ($arResult['TAX_LIST'] as $key => &$tax)
+				{
+					if ($tax['VALUE_MONEY'])
+						$tax['VALUE_MONEY_FORMATED'] = SaleFormatCurrency($tax['VALUE_MONEY'], $this->order->getCurrency());
+				}
+			}
+		}
+
+		$arResult['TAX_PRICE'] = $this->order->getTaxPrice();
+	}
+
+	/**
+	 * Set order total prices data from order object to $this->arResult
+	 */
+	protected function obtainTotal()
+	{
+		global $USER;
+		$arResult =& $this->arResult;
+
+		$locationAltPropDisplayManual = $this->request->get('LOCATION_ALT_PROP_DISPLAY_MANUAL');
+		if (!empty($locationAltPropDisplayManual) && is_array($locationAltPropDisplayManual))
+		{
+			foreach ($locationAltPropDisplayManual as $propId => $switch)
+			{
+				if (intval($propId))
+				{
+					$arResult['LOCATION_ALT_PROP_DISPLAY_MANUAL'][intval($propId)] = !!$switch;
+				}
+			}
+		}
+
+		$basket = $this->calculateBasket;
+
+		$arResult['BASKET_POSITIONS'] = $basket->count();
+
+		$arResult['ORDER_PRICE'] = $basket->getPrice();
+		$arResult['ORDER_PRICE_FORMATED'] = SaleFormatCurrency($arResult['ORDER_PRICE'], $this->order->getCurrency());
+
+		$arResult['ORDER_WEIGHT'] = $basket->getWeight();
+		$arResult['ORDER_WEIGHT_FORMATED'] = roundEx(floatval($arResult['ORDER_WEIGHT'] / $arResult['WEIGHT_KOEF']), SALE_WEIGHT_PRECISION).' '.$arResult['WEIGHT_UNIT'];
+
+		$arResult['PRICE_WITHOUT_DISCOUNT_VALUE'] = $basket->getBasePrice();
+		$arResult['PRICE_WITHOUT_DISCOUNT'] = SaleFormatCurrency($arResult['PRICE_WITHOUT_DISCOUNT_VALUE'], $this->order->getCurrency());
+
+		$arResult['BASKET_PRICE_DISCOUNT_DIFF_VALUE'] = $basket->getBasePrice() - $basket->getPrice();
+		$arResult['BASKET_PRICE_DISCOUNT_DIFF'] = SaleFormatCurrency($arResult['BASKET_PRICE_DISCOUNT_DIFF_VALUE'], $this->order->getCurrency());
+
+		$arResult['DISCOUNT_PRICE'] = Sale\PriceMaths::roundPrecision(
+			$this->order->getDiscountPrice() + ($arResult['PRICE_WITHOUT_DISCOUNT_VALUE'] - $arResult['ORDER_PRICE'])
+		);
+		$arResult['DISCOUNT_PRICE_FORMATED'] = SaleFormatCurrency($arResult['DISCOUNT_PRICE'], $this->order->getCurrency());
+
+		$arResult['DELIVERY_PRICE'] = Sale\PriceMaths::roundPrecision($this->order->getDeliveryPrice());
+		$arResult['DELIVERY_PRICE_FORMATED'] = SaleFormatCurrency($arResult['DELIVERY_PRICE'], $this->order->getCurrency());
+
+		$arResult['ORDER_TOTAL_PRICE'] = Sale\PriceMaths::roundPrecision($this->order->getPrice());
+		if($USER->GetID() != 27471){
+			$bonusesDeclension = new Declension('балл', 'балла', 'баллов');
+
+			$allBonuses = 0;
+			if ($USER->IsAuthorized()) {
+	    		$userInfo = $USER->GetByID($USER->GetID())->fetch();
+			    $bonuses = $userInfo['UF_SCORES'] ?? 0;
+			    $arResult['BONUSES'] = $bonuses . ' ' . $bonusesDeclension->get($bonuses);
+			    $allBonuses = intval($bonuses);
+			} else {
+			    $arResult['BONUSES'] = 0 . ' баллов';
+			}
+
+			$bonuses = $this->request->get('APPLY_BONUSES');
+
+			if ($bonuses) {
+				if (intval($arResult['ORDER_PRICE'] * 0.1) < intval($bonuses)) {
+					$bonuses = intval($arResult['ORDER_PRICE'] * 0.1);
+				}
+
+				if ($allBonuses < $bonuses) {
+					$bonuses = intval($allBonuses);
+				}
+
+				$arResult['ORDER_TOTAL_PRICE'] -= $bonuses;
+			}
+
+			$arResult['APPLY_BONUSES'] = $bonuses;
+			$arResult['ORDER_TOTAL_PRICE_FORMATED'] = SaleFormatCurrency($arResult['ORDER_TOTAL_PRICE'], $this->order->getCurrency());
+		}else{
+			$arResult['ORDER_TOTAL_PRICE_FORMATED'] = SaleFormatCurrency($arResult['ORDER_TOTAL_PRICE'], $this->order->getCurrency());
+		}
+	}
+
+	/**
+	 * Obtains all order fields filled by user.
+	 */
+	protected function obtainUserConsentInfo()
+	{
+		$propertyNames = [];
+
+		$propertyIterator = Sale\Property::getList([
+			'select' => ['NAME'],
+			'filter' => [
+				'ACTIVE' => 'Y',
+				'UTIL' => 'N',
+				'PERSON_TYPE_SITE.SITE_ID' => $this->getSiteId(),
+			],
+			'order' => [
+				'SORT' => 'ASC',
+				'ID' => 'ASC',
+			],
+			'runtime' => [
+				new \Bitrix\Main\Entity\ReferenceField(
+					'PERSON_TYPE_SITE',
+					'Bitrix\Sale\Internals\PersonTypeSiteTable',
+					['=this.PERSON_TYPE_ID' => 'ref.PERSON_TYPE_ID']
+				),
+			],
+		]);
+		while ($property = $propertyIterator->fetch())
+		{
+			$propertyNames[] = $property['NAME'];
+		}
+
+		$this->arResult['USER_CONSENT_PROPERTY_DATA'] = $propertyNames;
+	}
+
+	/**
+	 * Make $arResult compatible ('~' prefixes and htmlspecialcharsEx)
+	 */
+	protected function makeResultCompatible()
+	{
+		$arResult =& $this->arResult;
+
+		if (is_array($arResult['PERSON_TYPE']) && !empty($arResult['PERSON_TYPE']))
+			foreach ($arResult['PERSON_TYPE'] as &$item)
+				self::makeCompatibleArray($item);
+
+		if (is_array($arResult['ORDER_PROP']['RELATED']) && !empty($arResult['ORDER_PROP']['RELATED']))
+			foreach ($arResult['ORDER_PROP']['RELATED'] as &$item)
+				self::makeCompatibleArray($item);
+
+		if (is_array($arResult['ORDER_PROP']['USER_PROPS_Y']) && !empty($arResult['ORDER_PROP']['USER_PROPS_Y']))
+			foreach ($arResult['ORDER_PROP']['USER_PROPS_Y'] as &$item)
+				self::makeCompatibleArray($item);
+
+		if (is_array($arResult['ORDER_PROP']['USER_PROPS_N']) && !empty($arResult['ORDER_PROP']['USER_PROPS_N']))
+			foreach ($arResult['ORDER_PROP']['USER_PROPS_N'] as &$item)
+				self::makeCompatibleArray($item);
+
+		if (is_array($arResult['BASKET_ITEMS']) && !empty($arResult['BASKET_ITEMS']))
+			foreach ($arResult['BASKET_ITEMS'] as &$item)
+				self::makeCompatibleArray($item);
+
+		if (is_array($arResult['GRID']['ROWS']) && !empty($arResult['GRID']['ROWS']))
+			foreach ($arResult['GRID']['ROWS'] as &$item)
+				self::makeCompatibleArray($item['data']);
+
+		if (is_array($arResult['USER_ACCOUNT']) && !empty($arResult['USER_ACCOUNT']))
+			self::makeCompatibleArray($arResult['USER_ACCOUNT']);
+	}
+
+	public static function makeCompatibleArray(&$array)
+	{
+		if (empty($array) || !is_array($array))
+			return;
+
+		$arr = [];
+		foreach ($array as $key => $value)
+		{
+			if (is_array($value) || preg_match("/[;&<>\"]/", $value))
+			{
+				$arr[$key] = htmlspecialcharsEx($value);
+			}
+			else
+			{
+				$arr[$key] = $value;
+			}
+
+			$arr["~{$key}"] = $value;
+		}
+
+		$array = $arr;
+	}
+
+	/**
+	 * Check if PayPal prepayment is available
+	 *
+	 * @param Order $order
+	 * @throws Main\ArgumentException
+	 * @throws Main\NotSupportedException
+	 */
+	protected function usePrepayment(Order $order)
+	{
+		global $APPLICATION;
+		$arResult =& $this->arResult;
+
+		$prePayablePs = [];
+		$personTypes = array_keys(PersonType::load($this->getSiteId()));
+
+		if (!empty($personTypes))
+		{
+			$paySysActionIterator = PaySystem\Manager::getList([
+				'select' => [
+					'ID', 'PAY_SYSTEM_ID', 'PERSON_TYPE_ID', 'NAME', 'ACTION_FILE', 'RESULT_FILE',
+					'NEW_WINDOW', 'PARAMS', 'ENCODING', 'LOGOTIP',
+				],
+				'filter' => [
+					'ACTIVE' => 'Y',
+					'HAVE_PREPAY' => 'Y',
+				],
+			]);
+			$helper = Main\Application::getConnection()->getSqlHelper();
+
+			while ($paySysAction = $paySysActionIterator->fetch())
+			{
+				$dbRestriction = Sale\Internals\ServiceRestrictionTable::getList([
+					'select' => ['PARAMS'],
+					'filter' => [
+						'SERVICE_ID' => $paySysAction['ID'],
+						'CLASS_NAME' => $helper->forSql('\\'.Sale\Services\PaySystem\Restrictions\PersonType::class),
+						'SERVICE_TYPE' => Sale\Services\PaySystem\Restrictions\Manager::SERVICE_TYPE_PAYMENT,
+					],
+				]);
+
+				if ($restriction = $dbRestriction->fetch())
+				{
+					if (array_intersect($personTypes, $restriction['PARAMS']['PERSON_TYPE_ID']))
+					{
+						$prePayablePs = $paySysAction;
+						break;
+					}
+				}
+				else
+				{
+					$prePayablePs = $paySysAction;
+					break;
+				}
+			}
+
+			if ($prePayablePs)
+			{
+				$arResult['PREPAY_PS'] = $prePayablePs;
+				$arResult['HAVE_PREPAYMENT'] = true;
+
+				$this->prePaymentService = new PaySystem\Service($prePayablePs);
+				if ($this->prePaymentService->isPrePayable())
+				{
+					$this->prePaymentService->initPrePayment(null, $this->request);
+
+					if ($this->request->get('paypal') == 'Y' && $this->request->get('token'))
+					{
+						$arResult['PREPAY_ORDER_PROPS'] = $this->prePaymentService->getPrePaymentProps();
+
+						if (intval($this->arUserResult['PAY_SYSTEM_ID']) <= 0)
+						{
+							$this->arUserResult['PERSON_TYPE_ID'] = $arResult['PREPAY_PS']['PERSON_TYPE_ID'];
+						}
+
+						$this->arUserResult['PREPAYMENT_MODE'] = true;
+						$this->arUserResult['PAY_SYSTEM_ID'] = $arResult['PREPAY_PS']['ID'];
+					}
+					else
+					{
+						if ($this->arUserResult['PAY_SYSTEM_ID'] == $arResult['PREPAY_PS']['ID'])
+						{
+							$basketItems = [];
+							/** @var Sale\BasketItem $item */
+							foreach ($this->getBasketStorage()->getBasket() as $key => $item)
+							{
+								if ($item->canBuy() && !$item->isDelay())
+								{
+									$basketItems[$key]['NAME'] = $item->getField('NAME');
+									$basketItems[$key]['PRICE'] = $item->getPrice();
+									$basketItems[$key]['QUANTITY'] = $item->getQuantity();
+								}
+							}
+
+							$orderData = [
+								'PATH_TO_ORDER' => $APPLICATION->GetCurPage(),
+								'AMOUNT' => $order->getPrice(),
+								'ORDER_REQUEST' => 'Y',
+								'BASKET_ITEMS' => $basketItems,
+							];
+							$arResult['REDIRECT_URL'] = $this->prePaymentService->basketButtonAction($orderData);
+
+							if ($arResult['REDIRECT_URL'] != '')
+							{
+								$arResult['NEED_REDIRECT'] = 'Y';
+							}
+						}
+					}
+
+					$this->prePaymentService->setTemplateMode(PaySystem\BaseServiceHandler::STRING);
+					$this->prePaymentService->setTemplateParams([
+						'TOKEN' => $this->request->get('token'),
+						'PAYER_ID' => $this->request->get('PayerID'),
+					]);
+
+					$r = $this->prePaymentService->showTemplate(null, 'prepay_hidden_fields');
+					$arResult['PREPAY_ADIT_FIELDS'] = $r->getTemplate();
+				}
+			}
+		}
+	}
+
+	protected function prepayOrder()
+	{
+		if ($this->prePaymentService && $this->prePaymentService->isPrePayable() && $this->request->get('paypal') == 'Y')
+		{
+			/** @var Payment $payment */
+			$payment = $this->getExternalPayment($this->order);
+			if ($payment)
+			{
+				$this->prePaymentService->setOrderDataForPrePayment(
+					[
+						'ORDER_ID' => $this->order->getId(),
+						'PAYMENT_ID' => $payment->getId(),
+						'ORDER_PRICE' => $payment->getSum(),
+						'DELIVERY_PRICE' => $this->order->getDeliveryPrice(),
+						'TAX_PRICE' => $this->order->getTaxPrice(),
+					]
+				);
+
+				$orderData = [];
+				/** @var Sale\BasketItem $item */
+				foreach ($this->order->getBasket() as $item)
+					$orderData['BASKET_ITEMS'][] = $item->getFieldValues();
+
+				$this->prePaymentService->payOrderByPrePayment($orderData);
+			}
+		}
+	}
+
+	/**
+	 * Initialization of person types. Set person type data to $this->arResult.
+	 * Return true if person type changed.
+	 * Execution of 'OnSaleComponentOrderOneStepPersonType' event
+	 *
+	 * @param Order $order
+	 * @return bool
+	 * @throws Main\ArgumentException
+	 */
+	protected function initPersonType(Order $order)
+	{
+		$arResult =& $this->arResult;
+		$personTypeId = intval($this->arUserResult['PERSON_TYPE_ID']);
+		$personTypeIdOld = intval($this->arUserResult['PERSON_TYPE_OLD']);
+
+		$personTypes = PersonType::load($this->getSiteId());
+		foreach ($personTypes as $personType)
+		{
+			if ($personTypeId === intval($personType["ID"]) || !array_key_exists($personTypeId, $personTypes))
+			{
+				$personTypeId = intval($personType["ID"]);
+				$order->setPersonTypeId($personTypeId);
+				$this->arUserResult['PERSON_TYPE_ID'] = $personTypeId;
+				$personType["CHECKED"] = "Y";
+			}
+			$arResult["PERSON_TYPE"][$personType["ID"]] = $personType;
+		}
+
+		if ($personTypeId == 0)
+			$this->addError(Loc::getMessage("SOA_ERROR_PERSON_TYPE"), self::REGION_BLOCK);
+
+		$this->executeEvent('OnSaleComponentOrderOneStepPersonType', $order);
+
+		return count($arResult["PERSON_TYPE"]) > 1 && ($personTypeId !== $personTypeIdOld);
+	}
+
+	/**
+	 * Initialization of user profiles. Set user profiles data to $this->arResult.
+	 *
+	 * @param Order $order
+	 * @param       $isPersonTypeChanged
+	 */
+	// protected function initUserProfiles(Order $order, $isPersonTypeChanged)
+	// {
+	// 	$arResult =& $this->arResult;
+
+	// 	$justAuthorized = $this->request->get('do_authorize') === 'Y' || $this->request->get('do_register') === 'Y';
+	// 	$profileIsNotSelected = $this->arUserResult['PROFILE_CHANGE'] === false || $this->arUserResult['PROFILE_ID'] === false;
+	// 	$bFirst = false;
+
+	// 	$dbUserProfiles = CSaleOrderUserProps::GetList(
+	// 		["DATE_UPDATE" => "DESC", "PERSON_TYPE_ID" => 'ASC'],
+	// 		[
+	// 			//'PERSON_TYPE_ID' => $order->getPersonTypeId(),
+	// 			'USER_ID' => $order->getUserId(),
+	// 		]
+	// 	);
+	// 	while ($arUserProfiles = $dbUserProfiles->GetNext())
+	// 	{
+	// 		if (!$bFirst && ($profileIsNotSelected || $isPersonTypeChanged || $justAuthorized))
+	// 		{
+	// 			$bFirst = true;
+	// 			$this->arUserResult['PROFILE_ID'] = (int)$arUserProfiles['ID'];
+	// 		}
+
+	// 		if ((int)$this->arUserResult['PROFILE_ID'] === (int)$arUserProfiles['ID'])
+	// 		{
+	// 			$arUserProfiles['CHECKED'] = 'Y';
+	// 		}
+
+	// 		$arResult['ORDER_PROP']['USER_PROFILES'][$arUserProfiles['ID']] = $arUserProfiles;
+	// 	}
+	// }
+	protected function initUserProfiles(Order $order, $isPersonTypeChanged)
+	{
+		$arResult =& $this->arResult;
+
+		$justAuthorized = $this->request->get('do_authorize') == 'Y' || $this->request->get('do_register') == 'Y';
+		$profileId = $this->request->get('PROFILE_ID');
+		$bFirst = false;
+		$dbUserProfiles = CSaleOrderUserProps::GetList(
+			array("DATE_UPDATE" => "DESC", "PERSON_TYPE_ID" => 'ASC'),
+			array(
+				// "PERSON_TYPE_ID" => $order->getPersonTypeId(),
+				"USER_ID" => $order->getUserId()
+			)
+		);
+		while ($arUserProfiles = $dbUserProfiles->GetNext())
+		{
+			if (!$bFirst && !$profileId)
+			{
+				$bFirst = true;
+				$this->arUserResult['PROFILE_ID'] = intval($arUserProfiles["ID"]);
+			} elseif ($profileId) {
+				$this->arUserResult['PROFILE_ID'] = intval($profileId);
+			}
+
+			if (intval($this->arUserResult['PROFILE_ID']) == intval($arUserProfiles["ID"]))
+				$arUserProfiles["CHECKED"] = "Y";
+
+			$arResult["ORDER_PROP"]["USER_PROFILES"][$arUserProfiles["ID"]] = $arUserProfiles;
+		}
+	}
+	public function getCurrentShipment(Order $order)
+	{
+		/** @var Shipment $shipment */
+		foreach ($order->getShipmentCollection() as $shipment)
+		{
+			if (!$shipment->isSystem())
+				return $shipment;
+		}
+
+		return null;
+	}
+
+	protected function getDeliveryIds(Order $order)
+	{
+		$deliveryIds = [];
+		/** @var Shipment $shipment */
+		foreach ($order->getShipmentCollection() as $shipment)
+		{
+			if (!$shipment->isSystem())
+			{
+				$deliveryIds[] = $shipment->getDeliveryId();
+			}
+		}
+
+		return $deliveryIds;
+	}
+
+	/**
+	 * Initialization of shipment object with first/selected delivery service.
+	 *
+	 * @param Shipment $shipment
+	 * @throws Main\NotSupportedException
+	 */
+	protected function initDelivery(Shipment $shipment)
+	{
+		$deliveryId = intval($this->arUserResult['DELIVERY_ID']);
+		$this->initDeliveryServices($shipment);
+		/** @var Sale\ShipmentCollection $shipmentCollection */
+		$shipmentCollection = $shipment->getCollection();
+		$order = $shipmentCollection->getOrder();
+
+		if (!empty($this->arDeliveryServiceAll))
+		{
+			if (isset($this->arDeliveryServiceAll[$deliveryId]))
+			{
+				$deliveryObj = $this->arDeliveryServiceAll[$deliveryId];
+			}
+			else

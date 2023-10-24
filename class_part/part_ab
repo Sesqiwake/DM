@@ -1,0 +1,500 @@
+	/**
+	 * Returns array of order properties from request
+	 *
+	 * @return array
+	 */
+	protected function getPropertyValuesFromRequest()
+	{
+		$orderProperties = [];
+
+		foreach ($this->request as $k => $v)
+		{
+			if (mb_strpos($k, "ORDER_PROP_") !== false)
+			{
+				if (mb_strpos($k, "[]") !== false)
+					$orderPropId = intval(mb_substr($k, mb_strlen("ORDER_PROP_"), mb_strlen($k) - 2));
+				else
+					$orderPropId = intval(mb_substr($k, mb_strlen("ORDER_PROP_")));
+
+				if ($orderPropId > 0)
+					$orderProperties[$orderPropId] = $v;
+			}
+		}
+
+		foreach ($this->request->getFileList() as $k => $arFileData)
+		{
+			if (mb_strpos($k, "ORDER_PROP_") !== false)
+			{
+				$orderPropId = intval(mb_substr($k, mb_strlen("ORDER_PROP_")));
+
+				if (is_array($arFileData))
+				{
+					foreach ($arFileData as $param_name => $value)
+					{
+						if (is_array($value))
+						{
+							foreach ($value as $nIndex => $val)
+							{
+								if ($arFileData["name"][$nIndex] <> '')
+								{
+									$orderProperties[$orderPropId][$nIndex][$param_name] = $val;
+								}
+
+								if (!isset($orderProperties[$orderPropId][$nIndex]['ID']))
+								{
+									$orderProperties[$orderPropId][$nIndex]['ID'] = '';
+								}
+							}
+						}
+						else
+						{
+							$orderProperties[$orderPropId][$param_name] = $value;
+
+							if (!isset($orderProperties[$orderPropId]['ID']))
+							{
+								$orderProperties[$orderPropId]['ID'] = '';
+							}
+						}
+					}
+				}
+			}
+		}
+
+		return $orderProperties;
+	}
+
+	protected function addLastLocationPropertyValues($orderProperties)
+	{
+		$currentPersonType = (int)$this->arUserResult['PERSON_TYPE_ID'];
+		$lastPersonType = (int)$this->arUserResult['PERSON_TYPE_OLD'];
+
+		if (!empty($lastPersonType) && $currentPersonType !== $lastPersonType)
+		{
+			$propsByPersonType = [];
+
+			$props = Sale\Property::getList([
+				'select' => ['ID', 'PERSON_TYPE_ID', 'IS_LOCATION', 'IS_ZIP', 'DEFAULT_VALUE'],
+				'filter' => [
+					[
+						'LOGIC' => 'OR',
+						'=IS_ZIP' => 'Y',
+						'=IS_LOCATION' => 'Y',
+					],
+					[
+						'@PERSON_TYPE_ID' => [$currentPersonType, $lastPersonType],
+					],
+				],
+			]);
+
+			foreach ($props as $prop)
+			{
+				if ($prop['PERSON_TYPE_ID'] == $currentPersonType && !empty($prop['DEFAULT_VALUE']))
+				{
+					continue;
+				}
+
+				if ($prop['IS_LOCATION'] === 'Y')
+				{
+					$propsByPersonType[$prop['PERSON_TYPE_ID']]['IS_LOCATION'] = $prop['ID'];
+				}
+				else
+				{
+					$propsByPersonType[$prop['PERSON_TYPE_ID']]['IS_ZIP'] = $prop['ID'];
+				}
+			}
+
+			if (!empty($propsByPersonType[$lastPersonType]))
+			{
+				foreach ($propsByPersonType[$lastPersonType] as $code => $id)
+				{
+					if (!empty($propsByPersonType[$currentPersonType][$code]))
+					{
+						$newId = $propsByPersonType[$currentPersonType][$code];
+
+						if (empty($orderProperties[$newId]) && !empty($orderProperties[$id]))
+						{
+							$orderProperties[$newId] = $orderProperties[$id];
+						}
+					}
+				}
+			}
+		}
+
+		return $orderProperties;
+	}
+
+	protected function getBasketStorage()
+	{
+		if (!isset($this->basketStorage))
+		{
+			$this->basketStorage = Sale\Basket\Storage::getInstance(Sale\Fuser::getId(), $this->getSiteId());
+		}
+
+		return $this->basketStorage;
+	}
+
+	protected function getLastOrderData(Order $order)
+	{
+		$lastOrderData = [];
+
+		$registry = Sale\Registry::getInstance(Sale\Registry::REGISTRY_TYPE_ORDER);
+		/** @var Order $orderClassName */
+		$orderClassName = $registry->getOrderClassName();
+
+		$filter = [
+			'filter' => [
+				'USER_ID' => $order->getUserId(),
+				'LID' => $order->getSiteId(),
+			],
+			'select' => ['ID'],
+			'order' => ['ID' => 'DESC'],
+			'limit' => 1,
+		];
+
+		if ($arOrder = $orderClassName::getList($filter)->fetch())
+		{
+			/** @var Order $lastOrder */
+			$lastOrder = $orderClassName::load($arOrder['ID']);
+			$lastOrderData['PERSON_TYPE_ID'] = $lastOrder->getPersonTypeId();
+
+			if ($payment = $this->getInnerPayment($lastOrder))
+				$lastOrderData['PAY_CURRENT_ACCOUNT'] = 'Y';
+
+			if ($payment = $this->getExternalPayment($lastOrder))
+				$lastOrderData['PAY_SYSTEM_ID'] = $payment->getPaymentSystemId();
+
+			if ($shipment = $this->getCurrentShipment($lastOrder))
+			{
+				$lastOrderData['DELIVERY_ID'] = $shipment->getDeliveryId();
+				$lastOrderData['BUYER_STORE'] = $shipment->getStoreId();
+				$lastOrderData['DELIVERY_EXTRA_SERVICES'][$shipment->getDeliveryId()] = $shipment->getExtraServices();
+				if ($storeFields = Delivery\ExtraServices\Manager::getStoresFields($lastOrderData['DELIVERY_ID'], false))
+					unset($lastOrderData['DELIVERY_EXTRA_SERVICES'][$shipment->getDeliveryId()][$storeFields['ID']]);
+			}
+		}
+
+		return $lastOrderData;
+	}
+
+	protected function initLastOrderData(Order $order)
+	{
+		global $USER;
+
+		if (
+			($this->request->getRequestMethod() === 'GET' || $this->request->get('do_authorize') === 'Y' || $this->request->get('do_register') === 'Y')
+			&& $this->arUserResult['USE_PRELOAD']
+			&& $USER->IsAuthorized()
+		)
+		{
+			$showData = [];
+			$lastOrderData = $this->getLastOrderData($order);
+
+			if (!empty($lastOrderData))
+			{
+				if (!empty($lastOrderData['PERSON_TYPE_ID']))
+					$this->arUserResult['PERSON_TYPE_ID'] = $showData['PERSON_TYPE_ID'] = $lastOrderData['PERSON_TYPE_ID'];
+
+				if (!empty($lastOrderData['PAY_CURRENT_ACCOUNT']))
+					$this->arUserResult['PAY_CURRENT_ACCOUNT'] = $showData['PAY_CURRENT_ACCOUNT'] = $lastOrderData['PAY_CURRENT_ACCOUNT'];
+
+				if (!empty($lastOrderData['PAY_SYSTEM_ID']))
+					$this->arUserResult['PAY_SYSTEM_ID'] = $showData['PAY_SYSTEM_ID'] = $lastOrderData['PAY_SYSTEM_ID'];
+
+				if (!empty($lastOrderData['DELIVERY_ID']))
+					$this->arUserResult['DELIVERY_ID'] = $showData['DELIVERY_ID'] = $lastOrderData['DELIVERY_ID'];
+
+				if (!empty($lastOrderData['DELIVERY_EXTRA_SERVICES']))
+					$this->arUserResult['DELIVERY_EXTRA_SERVICES'] = $showData['DELIVERY_EXTRA_SERVICES'] = $lastOrderData['DELIVERY_EXTRA_SERVICES'];
+
+				if (!empty($lastOrderData['BUYER_STORE']))
+					$this->arUserResult['BUYER_STORE'] = $showData['BUYER_STORE'] = $lastOrderData['BUYER_STORE'];
+
+				$this->arUserResult['LAST_ORDER_DATA'] = $showData;
+			}
+		}
+	}
+
+	/**
+	 * Gets full order property list including all potential related properties (e.g. related to delivery or pay system).
+	 *
+	 * @param \Bitrix\Sale\Order $order
+	 * @return array
+	 */
+	protected function getFullPropertyList(Order $order)
+	{
+		$registry = Sale\Registry::getInstance(Sale\Registry::REGISTRY_TYPE_ORDER);
+		/** @var \Bitrix\Sale\PropertyBase $propertyClassName */
+		$propertyClassName = $registry->getPropertyClassName();
+
+		$result = $propertyClassName::getList([
+			'select' => [
+				'ID', 'PERSON_TYPE_ID', 'NAME', 'TYPE', 'REQUIRED', 'DEFAULT_VALUE', 'SORT',
+				'USER_PROPS', 'IS_LOCATION', 'PROPS_GROUP_ID', 'DESCRIPTION', 'IS_EMAIL', 'IS_PROFILE_NAME',
+				'IS_PAYER', 'IS_LOCATION4TAX', 'IS_FILTERED', 'CODE', 'IS_ZIP', 'IS_PHONE', 'IS_ADDRESS',
+				'ACTIVE', 'UTIL', 'INPUT_FIELD_LOCATION', 'MULTIPLE', 'SETTINGS',
+			],
+			'filter' => [
+				'=PERSON_TYPE_ID' => $order->getPersonTypeId(),
+			],
+			'order' => ['SORT' => 'ASC'],
+		]);
+
+		return $result->fetchAll();
+	}
+
+	/**
+	 * Initializes order properties from request, user profile, default values.
+	 * Checks properties (if order saves) and sets to the order.
+	 * Execution of 'OnSaleComponentOrderProperties' event.
+	 *
+	 * @param Order $order
+	 * @param       $isPersonTypeChanged
+	 */
+	protected function initProperties(Order $order, $isPersonTypeChanged)
+	{
+		$arResult =& $this->arResult;
+		$orderProperties = $this->getPropertyValuesFromRequest();
+		$orderProperties = $this->addLastLocationPropertyValues($orderProperties);
+
+		$this->initUserProfiles($order, $isPersonTypeChanged);
+
+		$firstLoad = $this->request->getRequestMethod() === 'GET';
+		$justAuthorized = $this->request->get('do_authorize') === 'Y'
+			|| $this->request->get('do_register') === 'Y'
+			|| $this->request->get('SMS_CODE');
+
+		$isProfileChanged = $this->arUserResult['PROFILE_CHANGE'] === 'Y';
+		$haveProfileId = (int)$this->arUserResult['PROFILE_ID'] > 0;
+
+		$shouldUseProfile = ($firstLoad || $justAuthorized || $isPersonTypeChanged || $isProfileChanged);
+		$willUseProfile = $shouldUseProfile && $haveProfileId;
+
+		$profileProperties = [];
+
+		if ($haveProfileId)
+		{
+			$profileProperties = Sale\OrderUserProperties::getProfileValues((int)$this->arUserResult['PROFILE_ID']);
+		}
+
+		$ipAddress = '';
+
+		if ($this->arParams['SPOT_LOCATION_BY_GEOIP'] === 'Y')
+		{
+			$ipAddress = \Bitrix\Main\Service\GeoIp\Manager::getRealIp();
+		}
+		$processAction = $this->request->get('processAction');
+		
+		foreach ($this->getFullPropertyList($order) as $property)
+		{
+			if ($property['USER_PROPS'] === 'Y')
+			{
+				if ($isProfileChanged && !$haveProfileId)
+				{
+					$curVal = '';
+				}
+				elseif (
+					$willUseProfile
+					|| (
+						!isset($orderProperties[$property['ID']])
+						&& isset($profileProperties[$property['ID']])
+					)
+				)
+				{
+					$curVal = $profileProperties[$property['ID']];
+				}
+				elseif (isset($orderProperties[$property['ID']]))
+				{
+					$curVal = $orderProperties[$property['ID']];
+				}
+				else
+				{
+					$curVal = '';
+				}
+			}
+			else
+			{
+				$curVal = isset($orderProperties[$property['ID']]) ? $orderProperties[$property['ID']] : '';
+			}
+
+
+
+			
+			if(!empty($processAction))
+			{
+				if(
+					($processAction == 'selectServices' || $processAction == 'selectProfile') && 
+					in_array($property['CODE'], ['EMAIL', 'PHONE', 'FULL_NAME', 'CONTACT_NAME']))
+				{
+					if(!empty($orderProperties[$property['ID']]))
+					{
+						$curVal = $orderProperties[$property['ID']];
+					}
+					else if($property['CODE'] == 'PHONE')
+					{
+						$curVal = $this->getValueFromCUser($property);
+					}
+				}
+			}
+			
+
+
+			/*if($property['CODE'] == 'PHONE')
+			{
+				if(!empty($orderProperties[$property['ID']]))
+				{
+					$curVal = $orderProperties[$property['ID']];
+				}
+				else
+				{
+					$curVal = $this->getValueFromCUser($property);
+				}
+			}*/
+
+
+
+			if ($arResult['HAVE_PREPAYMENT'] && !empty($arResult['PREPAY_ORDER_PROPS'][$property['CODE']]))
+			{
+				if ($property['TYPE'] === 'LOCATION')
+				{
+					$cityName = ToUpper($arResult['PREPAY_ORDER_PROPS'][$property['CODE']]);
+					$arLocation = LocationTable::getList([
+						'select' => ['CODE'],
+						'filter' => ['NAME.NAME_UPPER' => $cityName],
+					])
+						->fetch()
+					;
+
+					if (!empty($arLocation))
+					{
+						$curVal = $arLocation['CODE'];
+					}
+				}
+				else
+				{
+					$curVal = $arResult['PREPAY_ORDER_PROPS'][$property['CODE']];
+				}
+			}
+
+			if ($property['TYPE'] === 'LOCATION' && empty($curVal) && !empty($ipAddress))
+			{
+				$locCode = GeoIp::getLocationCode($ipAddress);
+
+				if (!empty($locCode))
+				{
+					$curVal = $locCode;
+				}
+			}
+			elseif ($property['IS_ZIP'] === 'Y' && empty($curVal) && !empty($ipAddress))
+			{
+				$zip = GeoIp::getZipCode($ipAddress);
+
+				if (!empty($zip))
+				{
+					$curVal = $zip;
+				}
+			}
+			elseif ($property['IS_PHONE'] === 'Y' && !empty($curVal))
+			{
+				$curVal = $this->getNormalizedPhone($curVal);
+			}
+
+			if (empty($curVal))
+			{
+				// getting default value for all properties except LOCATION
+				// (LOCATION - just for first load or person type change or new profile)
+				if ($property['TYPE'] !== 'LOCATION' || !$willUseProfile)
+				{
+					global $USER;
+
+					if ($shouldUseProfile && $USER->IsAuthorized())
+					{
+						$curVal = $this->getValueFromCUser($property);
+					}
+
+					if (empty($curVal) && !empty($property['DEFAULT_VALUE']))
+					{
+						$curVal = $property['DEFAULT_VALUE'];
+					}
+				}
+			}
+
+			if ($property['TYPE'] === 'LOCATION')
+			{
+				if (
+					(!$shouldUseProfile || $this->request->get('PROFILE_ID') === '0')
+					&& $this->request->get('location_type') !== 'code'
+				)
+				{
+					$curVal = CSaleLocation::getLocationCODEbyID($curVal);
+				}
+			}
+
+			$this->arUserResult['ORDER_PROP'][$property['ID']] = $curVal;
+		}
+		$this->checkProperties($order, $isPersonTypeChanged, $willUseProfile, $profileProperties);
+
+		foreach (GetModuleEvents('sale', 'OnSaleComponentOrderProperties', true) as $arEvent)
+		{
+			ExecuteModuleEventEx($arEvent, [&$this->arUserResult, $this->request, &$this->arParams, &$this->arResult]);
+		}
+
+		$this->setOrderProperties($order);
+	}
+
+	/**
+	 * Sets properties from $this->arUserResult['ORDER_PROP'] to the order.
+	 *
+	 * @param \Bitrix\Sale\Order $order
+	 */
+	protected function setOrderProperties(Order $order)
+	{
+		$propertyCollection = $order->getPropertyCollection();
+
+		$res = $propertyCollection->setValuesFromPost(['PROPERTIES' => $this->arUserResult['ORDER_PROP']], []);
+
+		if ($this->isOrderConfirmed)
+		{
+			if (!$res->isSuccess())
+			{
+				$this->addError($res, self::PROPERTY_BLOCK);
+			}
+
+			/** @var Sale\PropertyValue $propertyValue */
+			foreach ($propertyCollection as $propertyValue)
+			{
+				if ($propertyValue->isUtil())
+				{
+					continue;
+				}
+
+				$res = $propertyValue->verify();
+				if (!$res->isSuccess())
+				{
+					$this->addError($res, self::PROPERTY_BLOCK);
+				}
+
+				$res = $propertyValue->checkRequiredValue($propertyValue->getPropertyId(), $propertyValue->getValue());
+				if (!$res->isSuccess())
+				{
+					$this->addError($res, self::PROPERTY_BLOCK);
+				}
+			}
+		}
+	}
+
+	/**
+	 * Returns user property value from CUser
+	 *
+	 * @param    $property
+	 * @return    string
+	 */
+	protected function getValueFromCUser($property)
+	{
+		global $USER;
+
+		$value = '';
+
+		if ($property['IS_EMAIL'] === 'Y')
+		{
+			$value = $USER->GetEmail();
+		}

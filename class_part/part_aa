@@ -1,0 +1,500 @@
+<?php
+
+use Bitrix\Crm\Service\Sale\Order\BuyerService;
+use Bitrix\Main;
+use Bitrix\Main\Config\Option;
+use Bitrix\Main\Controller\PhoneAuth;
+use Bitrix\Main\Loader;
+use Bitrix\Main\Localization\Loc;
+use Bitrix\Main\Web\Json;
+use Bitrix\Sale;
+use Bitrix\Sale\Delivery;
+use Bitrix\Sale\DiscountCouponsManager;
+use Bitrix\Sale\Location\GeoIp;
+use Bitrix\Sale\Location\LocationTable;
+use Bitrix\Sale\Order;
+use Bitrix\Sale\Payment;
+use Bitrix\Sale\PaySystem;
+use Bitrix\Sale\PersonType;
+use Bitrix\Sale\Result;
+use Bitrix\Sale\Services\Company;
+use Bitrix\Sale\Shipment;
+use Bitrix\Main\UserTable;
+use Bitrix\Main\Grid\Declension;
+if (!defined('B_PROLOG_INCLUDED') || B_PROLOG_INCLUDED !== true)
+	die();
+
+/**
+ * @var $APPLICATION CMain
+ * @var $USER CUser
+ */
+
+Loc::loadMessages(__FILE__);
+
+if (!Loader::includeModule("sale"))
+{
+	ShowError(Loc::getMessage("SOA_MODULE_NOT_INSTALL"));
+
+	return;
+}
+
+class SaleOrderAjax extends \CBitrixComponent
+{
+	const AUTH_BLOCK = 'AUTH';
+	const REGION_BLOCK = 'REGION';
+	const PAY_SYSTEM_BLOCK = 'PAY_SYSTEM';
+	const DELIVERY_BLOCK = 'DELIVERY';
+	const PROPERTY_BLOCK = 'PROPERTY';
+
+	/** @var Order $order */
+	protected $order;
+	/** @var Sale\Basket\Storage $basketStorage */
+	protected $basketStorage;
+	/** @var Sale\Basket */
+	private $calculateBasket;
+
+	protected $action;
+	protected $arUserResult;
+	protected $isOrderConfirmed;
+	protected $arCustomSelectFields = [];
+	protected $arElementId = [];
+	protected $arSku2Parent = [];
+	/** @var Delivery\Services\Base[] $arDeliveryServiceAll */
+	protected $arDeliveryServiceAll = [];
+	protected $arPaySystemServiceAll = [];
+	protected $arActivePaySystems = [];
+	protected $arIblockProps = [];
+	/** @var  PaySystem\Service $prePaymentService */
+	protected $prePaymentService;
+	protected $useCatalog;
+	/** @var Main\Context $context */
+	protected $context;
+	protected $checkSession = true;
+	protected $isRequestViaAjax;
+
+	public function onPrepareComponentParams($arParams)
+	{
+		global $APPLICATION;
+
+		if (isset($arParams['CUSTOM_SITE_ID']))
+		{
+			$this->setSiteId($arParams['CUSTOM_SITE_ID']);
+		}
+
+		$this->useCatalog = Loader::includeModule('catalog');
+
+		if (!isset($arParams['COMPATIBLE_MODE']) && $this->initComponentTemplate())
+		{
+			$template = $this->getTemplate();
+
+			if (
+				$template instanceof CBitrixComponentTemplate
+				&& $template->GetSiteTemplate() == ''
+				&& $template->GetName() === '.default'
+			)
+			{
+				$arParams['COMPATIBLE_MODE'] = 'N';
+			}
+			else
+			{
+				$arParams['COMPATIBLE_MODE'] = 'Y';
+			}
+		}
+		else
+		{
+			$arParams['COMPATIBLE_MODE'] = $arParams['COMPATIBLE_MODE'] === 'N' ? 'N' : 'Y';
+		}
+
+		$arParams['USE_PRELOAD'] = $arParams['USE_PRELOAD'] === 'N' ? 'N' : 'Y';
+
+		if ($arParams['SET_TITLE'] === 'Y')
+		{
+			$APPLICATION->SetTitle(Loc::getMessage('SOA_TITLE'));
+		}
+
+		$arParams['ACTION_VARIABLE'] = isset($arParams['ACTION_VARIABLE']) ? trim($arParams['ACTION_VARIABLE']) : '';
+		if ($arParams['ACTION_VARIABLE'] == '')
+		{
+			$arParams['ACTION_VARIABLE'] = 'soa-action';
+		}
+
+		$arParams['PATH_TO_BASKET'] = isset($arParams['PATH_TO_BASKET']) ? trim($arParams['PATH_TO_BASKET']) : '';
+		if ($arParams['PATH_TO_BASKET'] == '')
+		{
+			$arParams['PATH_TO_BASKET'] = '/personal/cart/';
+		}
+
+		$arParams['NO_PERSONAL'] = isset($arParams['NO_PERSONAL']) && $arParams['NO_PERSONAL'] === 'Y' ? 'Y' : 'N';
+
+		if ($arParams['NO_PERSONAL'] === 'Y')
+		{
+			$arParams['PATH_TO_PERSONAL'] = '';
+		}
+		else
+		{
+			$arParams['PATH_TO_PERSONAL'] = isset($arParams['PATH_TO_PERSONAL']) ? trim((string)$arParams['PATH_TO_PERSONAL']) : '';
+
+			if ($arParams['PATH_TO_PERSONAL'] === '')
+			{
+				$arParams['PATH_TO_PERSONAL'] = 'index.php';
+			}
+		}
+
+		$arParams['PATH_TO_PAYMENT'] = isset($arParams['PATH_TO_PAYMENT']) ? trim($arParams['PATH_TO_PAYMENT']) : '';
+		if ($arParams['PATH_TO_PAYMENT'] == '')
+		{
+			$arParams['PATH_TO_PAYMENT'] = 'payment.php';
+		}
+
+		$arParams['PATH_TO_AUTH'] = isset($arParams['PATH_TO_AUTH']) ? trim($arParams['PATH_TO_AUTH']) : '';
+		if ($arParams['PATH_TO_AUTH'] == '')
+		{
+			$arParams['PATH_TO_AUTH'] = '/auth/';
+		}
+
+		$arParams['PAY_FROM_ACCOUNT'] = $arParams['PAY_FROM_ACCOUNT'] === 'Y' ? 'Y' : 'N';
+		$arParams['COUNT_DELIVERY_TAX'] = $arParams['COUNT_DELIVERY_TAX'] === 'Y' ? 'Y' : 'N';
+		$arParams['ONLY_FULL_PAY_FROM_ACCOUNT'] = $arParams['ONLY_FULL_PAY_FROM_ACCOUNT'] === 'Y' ? 'Y' : 'N';
+		$arParams['USE_PREPAYMENT'] = $arParams['USE_PREPAYMENT'] === 'Y' ? 'Y' : 'N';
+		$arParams['DISPLAY_IMG_HEIGHT'] = intval($arParams['DISPLAY_IMG_HEIGHT']) <= 0 ? 90 : intval($arParams['DISPLAY_IMG_HEIGHT']);
+		$arParams['SHOW_VAT_PRICE'] = $arParams['SHOW_VAT_PRICE'] === 'N' ? 'N' : 'Y';
+		$arParams['DELIVERY_TO_PAYSYSTEM'] = $arParams['DELIVERY_TO_PAYSYSTEM'] === 'p2d' ? 'p2d' : 'd2p';
+
+		if (!isset($arParams['DISABLE_BASKET_REDIRECT']) || $arParams['DISABLE_BASKET_REDIRECT'] !== 'Y')
+		{
+			$arParams['DISABLE_BASKET_REDIRECT'] = 'N';
+		}
+
+		$arParams['ALLOW_AUTO_REGISTER'] = $arParams['ALLOW_AUTO_REGISTER'] === 'Y' ? 'Y' : 'N';
+
+		if (!isset($arParams['CURRENT_PAGE']))
+		{
+			$arParams['CURRENT_PAGE'] = $APPLICATION->GetCurPage();
+		}
+
+		$siteId = $this->getSiteId();
+
+		$this->arResult = [
+			'PERSON_TYPE' => [],
+			'PAY_SYSTEM' => [],
+			'ORDER_PROP' => [],
+			'DELIVERY' => [],
+			'TAX' => [],
+			'ERROR' => [],
+			'ERROR_SORTED' => [],
+			'WARNING' => [],
+			'JS_DATA' => [],
+			'SHOW_EMPTY_BASKET' => false,
+			'ORDER_PRICE' => 0,
+			'ORDER_WEIGHT' => 0,
+			'VATE_RATE' => 0,
+			'VAT_SUM' => 0,
+			'bUsingVat' => false,
+			'BASKET_ITEMS' => [],
+			'BASE_LANG_CURRENCY' => Bitrix\Sale\Internals\SiteCurrencyTable::getSiteCurrency($siteId),
+			'WEIGHT_UNIT' => htmlspecialcharsbx(Option::get('sale', 'weight_unit', false, $siteId)),
+			'WEIGHT_KOEF' => htmlspecialcharsbx(Option::get('sale', 'weight_koef', 1, $siteId)),
+			'TaxExempt' => [],
+			'DISCOUNT_PRICE' => 0,
+			'DISCOUNT_PERCENT' => 0,
+			'DELIVERY_PRICE' => 0,
+			'TAX_PRICE' => 0,
+			'PAYED_FROM_ACCOUNT_FORMATED' => false,
+			'ORDER_TOTAL_PRICE_FORMATED' => false,
+			'ORDER_WEIGHT_FORMATED' => false,
+			'ORDER_PRICE_FORMATED' => false,
+			'VAT_SUM_FORMATED' => false,
+			'DELIVERY_SUM' => false,
+			'DELIVERY_PROFILE_SUM' => false,
+			'DELIVERY_PRICE_FORMATED' => false,
+			'DISCOUNT_PERCENT_FORMATED' => false,
+			'PAY_FROM_ACCOUNT' => false,
+			'CURRENT_BUDGET_FORMATED' => false,
+			'DISCOUNTS' => [],
+			'AUTH' => [],
+			'SMS_AUTH' => [],
+			'HAVE_PREPAYMENT' => false,
+			'PREPAY_PS' => [],
+			'PREPAY_ADIT_FIELDS' => '',
+			'PREPAY_ORDER_PROPS' => [],
+		];
+
+		if (!isset($arParams['IS_LANDING_SHOP']))
+		{
+			if (
+				!empty($arParams['CONTEXT_SITE_ID'])
+				&& Main\ModuleManager::isModuleInstalled('intranet')
+				&& Loader::includeModule('crm')
+			)
+			{
+				$arParams['IS_LANDING_SHOP'] = 'Y';
+			}
+			else
+			{
+				$arParams['IS_LANDING_SHOP'] = 'N';
+			}
+		}
+
+		if (!Loader::includeModule('crm'))
+		{
+			$arParams['IS_LANDING_SHOP'] = 'N';
+		}
+
+		$arParams['IS_LANDING_SHOP'] = $arParams['IS_LANDING_SHOP'] === 'Y' ? 'Y' : 'N';
+
+		if ($arParams['IS_LANDING_SHOP'] === 'Y')
+		{
+			$this->arResult['AUTH']['new_user_registration'] = 'N';
+			$arParams['ALLOW_AUTO_REGISTER'] = 'Y';
+		}
+		else
+		{
+			$this->arResult['AUTH']['new_user_registration'] = Option::get('main', 'new_user_registration', 'Y', $siteId) === 'Y' ? 'Y' : 'N';
+		}
+
+		$userRegistrationEmailConfirmation = Option::get('main', 'new_user_registration_email_confirmation', 'N', $siteId);
+		$this->arResult['AUTH']['new_user_registration_email_confirmation'] = $userRegistrationEmailConfirmation === 'Y' ? 'Y' : 'N';
+		$this->arResult['AUTH']['new_user_email_required'] = Option::get('main', 'new_user_email_required', '', $siteId) === 'Y' ? 'Y' : 'N';
+
+		$userPhoneAuth = Option::get('main', 'new_user_phone_auth', 'N', $siteId) === 'Y';
+		$this->arResult['AUTH']['new_user_phone_auth'] = $userPhoneAuth ? 'Y' : 'N';
+
+		$userPhoneAuthRequired = $userPhoneAuth && Option::get('main', 'new_user_phone_required', 'N', $siteId) === 'Y';
+		$this->arResult['AUTH']['new_user_phone_required'] = $userPhoneAuthRequired ? 'Y' : 'N';
+
+		if (
+			$arParams['ALLOW_AUTO_REGISTER'] === 'Y'
+			&& $arParams['IS_LANDING_SHOP'] === 'N'
+			&& (
+				$this->arResult['AUTH']['new_user_registration_email_confirmation'] === 'Y'
+				|| $this->arResult['AUTH']['new_user_registration'] === 'N'
+			)
+		)
+		{
+			$arParams['ALLOW_AUTO_REGISTER'] = 'N';
+		}
+
+		$arParams['ALLOW_APPEND_ORDER'] = $arParams['ALLOW_APPEND_ORDER'] === 'N' ? 'N' : 'Y';
+		$arParams['SEND_NEW_USER_NOTIFY'] = $arParams['SEND_NEW_USER_NOTIFY'] === 'N' ? 'N' : 'Y';
+		$arParams['ALLOW_NEW_PROFILE'] = $arParams['ALLOW_NEW_PROFILE'] === 'N' ? 'N' : 'Y';
+		$arParams['DELIVERY_NO_SESSION'] = $arParams['DELIVERY_NO_SESSION'] === 'N' ? 'N' : 'Y';
+
+		if (!isset($arParams['DELIVERY_NO_AJAX']) || !in_array($arParams['DELIVERY_NO_AJAX'], ['Y', 'N', 'H']))
+		{
+			$arParams['DELIVERY_NO_AJAX'] = 'N';
+		}
+
+		if (
+			!isset($arParams['SHOW_NOT_CALCULATED_DELIVERIES'])
+			|| !in_array($arParams['SHOW_NOT_CALCULATED_DELIVERIES'], ['N', 'L', 'Y'])
+		)
+		{
+			$arParams['SHOW_NOT_CALCULATED_DELIVERIES'] = 'L';
+		}
+
+		if ($arParams['DELIVERY_NO_AJAX'] !== 'Y')
+		{
+			$arParams['SHOW_NOT_CALCULATED_DELIVERIES'] = 'Y';
+		}
+
+		//compatibility to old default columns in basket
+		if (!empty($arParams['PRODUCT_COLUMNS_VISIBLE']))
+		{
+			$arParams['PRODUCT_COLUMNS'] = $arParams['PRODUCT_COLUMNS_VISIBLE'];
+		}
+		else
+		{
+			if (!isset($arParams['PRODUCT_COLUMNS_VISIBLE']) && !isset($arParams['PRODUCT_COLUMNS']))
+			{
+				$arParams['PRODUCT_COLUMNS'] = ['PREVIEW_PICTURE', 'PROPS'];
+			}
+			elseif (!isset($arParams['PRODUCT_COLUMNS_VISIBLE']) && is_array($arParams['PRODUCT_COLUMNS']))
+			{
+				if (!empty($arParams['PRODUCT_COLUMNS']))
+				{
+					$arParams['PRODUCT_COLUMNS'] = array_merge($arParams['PRODUCT_COLUMNS'], ['PRICE_FORMATED']);
+				}
+				else
+				{
+					$arParams['PRODUCT_COLUMNS'] = ['PROPS', 'DISCOUNT_PRICE_PERCENT_FORMATED', 'PRICE_FORMATED'];
+				}
+			}
+
+			$arParams['PRODUCT_COLUMNS_VISIBLE'] = $arParams['PRODUCT_COLUMNS'];
+		}
+
+		$arDefaults = ['PROPS', 'DISCOUNT_PRICE_PERCENT_FORMATED', 'PRICE_FORMATED'];
+		$arDiff = [];
+		if (!empty($arParams['PRODUCT_COLUMNS']) && is_array($arParams['PRODUCT_COLUMNS']))
+		{
+			$arDiff = array_diff($arParams['PRODUCT_COLUMNS'], $arDefaults);
+		}
+
+		$this->arResult['GRID']['DEFAULT_COLUMNS'] = count($arParams['PRODUCT_COLUMNS']) > 2 && empty($arDiff);
+
+		if (empty($arParams['PRODUCT_COLUMNS']))
+		{
+			$arParams['PRODUCT_COLUMNS'] = [
+				'NAME' => Loc::getMessage('SOA_NAME_DEFAULT_COLUMN'),
+				'QUANTITY' => Loc::getMessage('SOA_QUANTITY_DEFAULT_COLUMN'),
+				'SUM' => Loc::getMessage('SOA_SUM_DEFAULT_COLUMN'),
+			];
+		}
+		else
+		{
+			// processing default or certain iblock fields if they are selected
+			if (($key = array_search('PREVIEW_TEXT', $arParams['PRODUCT_COLUMNS'])) !== false)
+			{
+				unset($arParams['PRODUCT_COLUMNS'][$key]);
+				$arParams['PRODUCT_COLUMNS']['PREVIEW_TEXT'] = Loc::getMessage('SOA_NAME_COLUMN_PREVIEW_TEXT');
+			}
+
+			if (($key = array_search('PREVIEW_PICTURE', $arParams['PRODUCT_COLUMNS'])) !== false)
+			{
+				unset($arParams['PRODUCT_COLUMNS'][$key]);
+				$arParams['PRODUCT_COLUMNS']['PREVIEW_PICTURE'] = Loc::getMessage('SOA_NAME_COLUMN_PREVIEW_PICTURE');
+			}
+
+			if (($key = array_search('DETAIL_PICTURE', $arParams['PRODUCT_COLUMNS'])) !== false)
+			{
+				unset($arParams['PRODUCT_COLUMNS'][$key]);
+				$arParams['PRODUCT_COLUMNS']['DETAIL_PICTURE'] = Loc::getMessage('SOA_NAME_COLUMN_DETAIL_PICTURE');
+			}
+
+			if (($key = array_search('PROPS', $arParams['PRODUCT_COLUMNS'])) !== false)
+			{
+				unset($arParams['PRODUCT_COLUMNS'][$key]);
+				$arParams['PRODUCT_COLUMNS']['PROPS'] = Loc::getMessage('SOA_PROPS_DEFAULT_COLUMN');
+			}
+
+			if (($key = array_search('NOTES', $arParams['PRODUCT_COLUMNS'])) !== false)
+			{
+				unset($arParams['PRODUCT_COLUMNS'][$key]);
+				$arParams['PRODUCT_COLUMNS']['NOTES'] = Loc::getMessage('SOA_PRICE_TYPE_DEFAULT_COLUMN');
+			}
+
+			if (($key = array_search('DISCOUNT_PRICE_PERCENT_FORMATED', $arParams['PRODUCT_COLUMNS'])) !== false)
+			{
+				unset($arParams['PRODUCT_COLUMNS'][$key]);
+				$arParams['PRODUCT_COLUMNS']['DISCOUNT_PRICE_PERCENT_FORMATED'] = Loc::getMessage('SOA_DISCOUNT_DEFAULT_COLUMN');
+			}
+
+			if (($key = array_search('PRICE_FORMATED', $arParams['PRODUCT_COLUMNS'])) !== false)
+			{
+				unset($arParams['PRODUCT_COLUMNS'][$key]);
+				$arParams['PRODUCT_COLUMNS']['PRICE_FORMATED'] = Loc::getMessage('SOA_PRICE_DEFAULT_COLUMN');
+			}
+
+			if (($key = array_search('WEIGHT_FORMATED', $arParams['PRODUCT_COLUMNS'])) !== false)
+			{
+				unset($arParams['PRODUCT_COLUMNS'][$key]);
+				$arParams['PRODUCT_COLUMNS']['WEIGHT_FORMATED'] = Loc::getMessage('SOA_WEIGHT_DEFAULT_COLUMN');
+			}
+		}
+
+		if (!empty($arParams['PRODUCT_COLUMNS_HIDDEN']))
+		{
+			// processing default or certain iblock fields if they are selected
+			if (($key = array_search('PREVIEW_TEXT', $arParams['PRODUCT_COLUMNS_HIDDEN'])) !== false)
+			{
+				unset($arParams['PRODUCT_COLUMNS_HIDDEN'][$key]);
+				$arParams['PRODUCT_COLUMNS_HIDDEN']['PREVIEW_TEXT'] = Loc::getMessage('SOA_NAME_COLUMN_PREVIEW_TEXT');
+			}
+
+			if (($key = array_search('PREVIEW_PICTURE', $arParams['PRODUCT_COLUMNS_HIDDEN'])) !== false)
+			{
+				unset($arParams['PRODUCT_COLUMNS_HIDDEN'][$key]);
+				$arParams['PRODUCT_COLUMNS_HIDDEN']['PREVIEW_PICTURE'] = Loc::getMessage('SOA_NAME_COLUMN_PREVIEW_PICTURE');
+			}
+
+			if (($key = array_search('DETAIL_PICTURE', $arParams['PRODUCT_COLUMNS_HIDDEN'])) !== false)
+			{
+				unset($arParams['PRODUCT_COLUMNS_HIDDEN'][$key]);
+				$arParams['PRODUCT_COLUMNS_HIDDEN']['DETAIL_PICTURE'] = Loc::getMessage('SOA_NAME_COLUMN_DETAIL_PICTURE');
+			}
+
+			if (($key = array_search('PROPS', $arParams['PRODUCT_COLUMNS_HIDDEN'])) !== false)
+			{
+				unset($arParams['PRODUCT_COLUMNS_HIDDEN'][$key]);
+				$arParams['PRODUCT_COLUMNS_HIDDEN']['PROPS'] = Loc::getMessage('SOA_PROPS_DEFAULT_COLUMN');
+			}
+
+			if (($key = array_search('NOTES', $arParams['PRODUCT_COLUMNS_HIDDEN'])) !== false)
+			{
+				unset($arParams['PRODUCT_COLUMNS_HIDDEN'][$key]);
+				$arParams['PRODUCT_COLUMNS_HIDDEN']['NOTES'] = Loc::getMessage('SOA_PRICE_TYPE_DEFAULT_COLUMN');
+			}
+
+			if (($key = array_search('DISCOUNT_PRICE_PERCENT_FORMATED', $arParams['PRODUCT_COLUMNS_HIDDEN'])) !== false)
+			{
+				unset($arParams['PRODUCT_COLUMNS_HIDDEN'][$key]);
+				$arParams['PRODUCT_COLUMNS_HIDDEN']['DISCOUNT_PRICE_PERCENT_FORMATED'] = Loc::getMessage('SOA_DISCOUNT_DEFAULT_COLUMN');
+			}
+
+			if (($key = array_search('PRICE_FORMATED', $arParams['PRODUCT_COLUMNS_HIDDEN'])) !== false)
+			{
+				unset($arParams['PRODUCT_COLUMNS_HIDDEN'][$key]);
+				$arParams['PRODUCT_COLUMNS_HIDDEN']['PRICE_FORMATED'] = Loc::getMessage('SOA_PRICE_DEFAULT_COLUMN');
+			}
+
+			if (($key = array_search('WEIGHT_FORMATED', $arParams['PRODUCT_COLUMNS_HIDDEN'])) !== false)
+			{
+				unset($arParams['PRODUCT_COLUMNS_HIDDEN'][$key]);
+				$arParams['PRODUCT_COLUMNS_HIDDEN']['WEIGHT_FORMATED'] = Loc::getMessage('SOA_WEIGHT_DEFAULT_COLUMN');
+			}
+		}
+
+		// required grid columns
+		if (empty($arParams['PRODUCT_COLUMNS']['NAME']))
+		{
+			$arParams['PRODUCT_COLUMNS'] = ['NAME' => Loc::getMessage('SOA_NAME_DEFAULT_COLUMN')] + $arParams['PRODUCT_COLUMNS'];
+		}
+
+		if (empty($arParams['PRODUCT_COLUMNS']['QUANTITY']))
+		{
+			$arParams['PRODUCT_COLUMNS']['QUANTITY'] = Loc::getMessage('SOA_QUANTITY_DEFAULT_COLUMN');
+		}
+
+		if (empty($arParams['PRODUCT_COLUMNS']['SUM']))
+		{
+			$arParams['PRODUCT_COLUMNS']['SUM'] = Loc::getMessage('SOA_SUM_DEFAULT_COLUMN');
+		}
+
+		foreach ($arParams as $k => $v)
+		{
+			if (mb_strpos($k, 'ADDITIONAL_PICT_PROP_') !== false)
+			{
+				$iblockId = intval(mb_substr($k, mb_strlen('ADDITIONAL_PICT_PROP_')));
+
+				if ($v !== '-')
+				{
+					$arParams['ADDITIONAL_PICT_PROP'][$iblockId] = $v;
+				}
+
+				unset($arParams[$k]);
+			}
+		}
+
+		// check for direct initialization with ADDITIONAL_PICT_PROP parameter
+		if (!empty($arParams['ADDITIONAL_PICT_PROP']) && is_array($arParams['ADDITIONAL_PICT_PROP']))
+		{
+			$pictProp = [];
+
+			foreach ($arParams['ADDITIONAL_PICT_PROP'] as $iblockId => $property)
+			{
+				$pictProp[(int)$iblockId] = $property;
+			}
+
+			$arParams['ADDITIONAL_PICT_PROP'] = $pictProp;
+		}
+
+		if (!isset($arParams['BASKET_IMAGES_SCALING']) || !in_array($arParams['BASKET_IMAGES_SCALING'], ['standard', 'adaptive', 'no_scale']))
+		{
+			$arParams['BASKET_IMAGES_SCALING'] = 'adaptive';
+		}
+
+		$arParams['USE_PHONE_NORMALIZATION'] = isset($arParams['USE_PHONE_NORMALIZATION']) && $arParams['USE_PHONE_NORMALIZATION'] === 'N' ? 'N' : 'Y';
+
+		return $arParams;
+	}
+

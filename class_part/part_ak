@@ -1,0 +1,500 @@
+	 */
+	public static function resizeImage(array &$item, $imageKey, array $arImage, array $sizeAdaptive, array $sizeStandard, $scale = '')
+	{
+		if ($scale == '')
+		{
+			$scale = 'adaptive';
+		}
+
+		if ($scale === 'no_scale')
+		{
+			$item[$imageKey.'_SRC'] = $arImage['SRC'];
+			$item[$imageKey.'_SRC_ORIGINAL'] = $arImage['SRC'];
+		}
+		elseif ($scale === 'adaptive')
+		{
+			$arFileTmp = CFile::ResizeImageGet(
+				$arImage,
+				['width' => $sizeAdaptive['width'] / 2, 'height' => $sizeAdaptive['height'] / 2],
+				BX_RESIZE_IMAGE_PROPORTIONAL,
+				true
+			);
+			$item[$imageKey.'_SRC'] = $arFileTmp['src'];
+
+			$arFileTmp = CFile::ResizeImageGet(
+				$arImage,
+				$sizeAdaptive,
+				BX_RESIZE_IMAGE_PROPORTIONAL,
+				true
+			);
+			$item[$imageKey.'_SRC_2X'] = $arFileTmp['src'];
+
+			$item[$imageKey.'_SRC_ORIGINAL'] = $arImage['SRC'];
+		}
+		else
+		{
+			$arFileTmp = CFile::ResizeImageGet($arImage, $sizeStandard, BX_RESIZE_IMAGE_PROPORTIONAL, true);
+			$item[$imageKey.'_SRC'] = $arFileTmp['src'];
+
+			$item[$imageKey.'_SRC_ORIGINAL'] = $arImage['SRC'];
+		}
+	}
+
+	/**
+	 * Obtain all order data to $this->arResult['JS_DATA'] for template js initialization
+	 * Execution of 'OnSaleComponentOrderJsData' event
+	 *
+	 * @throws Main\ObjectNotFoundException
+	 */
+	protected function getJsDataResult()
+	{
+		global $USER;
+		$arResult =& $this->arResult;
+		$result =& $this->arResult['JS_DATA'];
+
+		$result['IS_AUTHORIZED'] = $USER->IsAuthorized();
+		$result['LAST_ORDER_DATA'] = [];
+
+		if (
+			($this->request->getRequestMethod() === 'GET' || $this->request->get('do_authorize') === 'Y' || $this->request->get('do_register') === 'Y')
+			&& $this->arUserResult['USE_PRELOAD']
+			&& $result['IS_AUTHORIZED']
+		)
+		{
+			$lastOrder =& $this->arUserResult['LAST_ORDER_DATA'];
+
+			if (!empty($lastOrder))
+			{
+				$status = false;
+				if (!empty($lastOrder['PERSON_TYPE_ID']))
+				{
+					$status = $this->order->getPersonTypeId() == $lastOrder['PERSON_TYPE_ID'];
+				}
+
+				$result['LAST_ORDER_DATA']['PERSON_TYPE'] = $status;
+
+				$status = false;
+				if (!empty($lastOrder['DELIVERY_ID']) && $shipment = $this->getCurrentShipment($this->order))
+				{
+					if (empty($lastOrder['DELIVERY_EXTRA_SERVICES'][$lastOrder['DELIVERY_ID']]))
+					{
+						$status = $shipment->getDeliveryId() == $lastOrder['DELIVERY_ID'];
+					}
+				}
+
+				$result['LAST_ORDER_DATA']['DELIVERY'] = $status;
+
+				$status = false;
+				if (empty($lastOrder['PAY_CURRENT_ACCOUNT']) && !empty($lastOrder['PAY_SYSTEM_ID']) && $payment = $this->getExternalPayment($this->order))
+				{
+					$status = $payment->getPaymentSystemId() == $lastOrder['PAY_SYSTEM_ID'];
+				}
+
+				$result['LAST_ORDER_DATA']['PAY_SYSTEM'] = $status;
+
+				$status = false;
+				if (!empty($lastOrder['BUYER_STORE']) && $shipment = $this->getCurrentShipment($this->order))
+				{
+					$status = $shipment->getStoreId() == $lastOrder['BUYER_STORE'];
+				}
+
+				$result['LAST_ORDER_DATA']['PICK_UP'] = $status;
+			}
+			else
+			{
+				// last order data cannot initialize
+				$result['LAST_ORDER_DATA']['FAIL'] = true;
+			}
+		}
+		else
+		{
+			// last order data not initialized
+			$result['LAST_ORDER_DATA']['FAIL'] = false;
+		}
+
+		$result['ZIP_PROPERTY_CHANGED'] = $this->arUserResult['ZIP_PROPERTY_CHANGED'];
+		$result['ORDER_DESCRIPTION'] = $this->arUserResult['ORDER_DESCRIPTION'];
+		$result['SHOW_AUTH'] = !$USER->IsAuthorized() && $this->arParams['ALLOW_AUTO_REGISTER'] === 'N';
+		$result['SHOW_EMPTY_BASKET'] = $arResult['SHOW_EMPTY_BASKET'];
+		$result['AUTH'] = $arResult['AUTH'];
+		$result['SMS_AUTH'] = $arResult['SMS_AUTH'];
+		$result['OK_MESSAGE'] = $arResult['OK_MESSAGE'];
+		$result['GRID'] = $arResult['GRID'];
+		$result['PERSON_TYPE'] = $arResult["PERSON_TYPE"];
+		$result['PAY_SYSTEM'] = $arResult["PAY_SYSTEM"];
+		$result['INNER_PAY_SYSTEM'] = $arResult["INNER_PAY_SYSTEM"];
+		$result['DELIVERY'] = $arResult["DELIVERY"];
+		$result['APPLY_BONUSES'] = $arResult['APPLY_BONUSES'];		
+	    $result['BONUSES'] = $arResult['BONUSES'];
+		foreach ($result['DELIVERY'] as &$delivery)
+		{
+			if (!empty($delivery['EXTRA_SERVICES']))
+			{
+				$arExtraService = [];
+				/** @var Delivery\ExtraServices\Base $extraService */
+				foreach ($delivery['EXTRA_SERVICES'] as $extraServiceId => $extraService)
+				{
+					if ($extraService->canUserEditValue())
+					{
+						$arr = [];
+						$arr['id'] = $extraServiceId;
+						$arr['name'] = $extraService->getName();
+						$arr['value'] = $extraService->getValue();
+						$arr['price'] = $extraService->getPriceShipment($this->getCurrentShipment($this->order));
+						$arr['priceFormatted'] = SaleFormatCurrency($extraService->getPriceShipment($this->getCurrentShipment($this->order)), $this->order->getCurrency());
+						$arr['description'] = $extraService->getDescription();
+						$arr['canUserEditValue'] = $extraService->canUserEditValue();
+						$arr['editControl'] = $extraService->getEditControl('DELIVERY_EXTRA_SERVICES['.$delivery['ID'].']['.$extraServiceId.']');
+						$arr['viewControl'] = $extraService->getViewControl();
+						$arExtraService[] = $arr;
+					}
+				}
+
+				$delivery['EXTRA_SERVICES'] = $arExtraService;
+			}
+		}
+
+		$result["USER_PROFILES"] = $arResult["ORDER_PROP"]['USER_PROFILES'];
+
+		$arr = $this->order->getPropertyCollection()->getArray();
+
+		foreach ($arr['properties'] as $key => $property)
+		{
+			if ($property['UTIL'] === 'Y')
+			{
+				unset($arr['properties'][$key]);
+			}
+		}
+
+		if (!empty($arr['groups']) && !empty($arr['properties']))
+		{
+			$arr['groups'] = array_values($arr['groups']);
+			$arr['properties'] = array_values($arr['properties']);
+
+			$groupIndexList = [];
+
+			foreach ($arr['groups'] as $groupData)
+			{
+				$groupIndexList[] = (int)$groupData['ID'];
+			}
+
+			if (!empty($groupIndexList))
+			{
+				foreach ($arr['properties'] as $index => $propertyData)
+				{
+					if (array_key_exists('PROPS_GROUP_ID', $propertyData))
+					{
+						if (!in_array($propertyData['PROPS_GROUP_ID'], $groupIndexList))
+						{
+							$arr['properties'][$index]['PROPS_GROUP_ID'] = 0;
+						}
+					}
+
+					if ($propertyData['TYPE'] === 'ENUM' && is_array($propertyData['OPTIONS']))
+					{
+						$arr['properties'][$index]['OPTIONS_SORT'] = array_keys($propertyData['OPTIONS']);
+					}
+				}
+			}
+
+		}
+
+		$result["ORDER_PROP"] = $arr;
+		$result['STORE_LIST'] = $arResult['STORE_LIST'];
+		$result['BUYER_STORE'] = $arResult['BUYER_STORE'];
+
+		$result['COUPON_LIST'] = [];
+		$arCoupons = DiscountCouponsManager::get(true, [], true, true);
+		if (!empty($arCoupons))
+		{
+			foreach ($arCoupons as &$oneCoupon)
+			{
+				if ($oneCoupon['STATUS'] == DiscountCouponsManager::STATUS_NOT_FOUND || $oneCoupon['STATUS'] == DiscountCouponsManager::STATUS_FREEZE)
+				{
+					$oneCoupon['JS_STATUS'] = 'BAD';
+				}
+				elseif ($oneCoupon['STATUS'] == DiscountCouponsManager::STATUS_NOT_APPLYED || $oneCoupon['STATUS'] == DiscountCouponsManager::STATUS_ENTERED)
+				{
+					$oneCoupon['JS_STATUS'] = 'ENTERED';
+				}
+				else
+				{
+					$oneCoupon['JS_STATUS'] = 'APPLIED';
+				}
+
+				$oneCoupon['JS_CHECK_CODE'] = '';
+				if (isset($oneCoupon['CHECK_CODE_TEXT']))
+				{
+					$oneCoupon['JS_CHECK_CODE'] = is_array($oneCoupon['CHECK_CODE_TEXT'])
+						? implode(', ', $oneCoupon['CHECK_CODE_TEXT'])
+						: $oneCoupon['CHECK_CODE_TEXT'];
+				}
+
+				$result['COUPON_LIST'][] = $oneCoupon;
+			}
+
+			unset($oneCoupon);
+			$result['COUPON_LIST'] = array_values($arCoupons);
+		}
+		unset($arCoupons);
+
+		$result['PAY_CURRENT_ACCOUNT'] = 'N';
+		if ($innerPaySystem = $this->order->getPaymentCollection()->getInnerPayment())
+		{
+			if ($innerPaySystem->getSum() > 0)
+			{
+				$result['PAY_CURRENT_ACCOUNT'] = 'Y';
+			}
+		}
+
+		$result['PAY_FROM_ACCOUNT'] = $arResult["PAY_FROM_ACCOUNT"];
+		$result['CURRENT_BUDGET_FORMATED'] = $arResult["CURRENT_BUDGET_FORMATED"];
+
+		$result['TOTAL'] = [
+			'BASKET_POSITIONS' => $arResult["BASKET_POSITIONS"],
+			'PRICE_WITHOUT_DISCOUNT_VALUE' => $arResult["PRICE_WITHOUT_DISCOUNT_VALUE"],
+			'PRICE_WITHOUT_DISCOUNT' => $arResult["PRICE_WITHOUT_DISCOUNT"],
+			'BASKET_PRICE_DISCOUNT_DIFF_VALUE' => $arResult["BASKET_PRICE_DISCOUNT_DIFF_VALUE"],
+			'BASKET_PRICE_DISCOUNT_DIFF' => $arResult["BASKET_PRICE_DISCOUNT_DIFF"],
+			'PAYED_FROM_ACCOUNT_FORMATED' => $arResult["PAYED_FROM_ACCOUNT_FORMATED"],
+			'ORDER_TOTAL_PRICE' => $arResult["ORDER_TOTAL_PRICE"],
+			'ORDER_TOTAL_PRICE_FORMATED' => $arResult["ORDER_TOTAL_PRICE_FORMATED"],
+			'ORDER_TOTAL_LEFT_TO_PAY' => $arResult["ORDER_TOTAL_LEFT_TO_PAY"],
+			'ORDER_TOTAL_LEFT_TO_PAY_FORMATED' => $arResult["ORDER_TOTAL_LEFT_TO_PAY_FORMATED"],
+			'ORDER_WEIGHT' => $arResult["ORDER_WEIGHT"],
+			'ORDER_WEIGHT_FORMATED' => $arResult["ORDER_WEIGHT_FORMATED"],
+			'ORDER_PRICE' => $arResult["ORDER_PRICE"],
+			'ORDER_PRICE_FORMATED' => $arResult["ORDER_PRICE_FORMATED"],
+			'USE_VAT' => $arResult["USE_VAT"],
+			'VAT_RATE' => $arResult["VAT_RATE"],
+			'VAT_SUM' => $arResult["VAT_SUM"],
+			'VAT_SUM_FORMATED' => $arResult["VAT_SUM_FORMATED"],
+			'TAX_PRICE' => $arResult["TAX_PRICE"],
+			'TAX_LIST' => $arResult["TAX_LIST"],
+			'DISCOUNT_PRICE' => $arResult["DISCOUNT_PRICE"],
+			'DISCOUNT_PRICE_FORMATED' => $arResult["DISCOUNT_PRICE_FORMATED"],
+			'DELIVERY_PRICE' => $arResult["DELIVERY_PRICE"],
+			'DELIVERY_PRICE_FORMATED' => $arResult["DELIVERY_PRICE_FORMATED"],
+			'PAY_SYSTEM_PRICE' => $arResult["PAY_SYSTEM_PRICE"],
+			'PAY_SYSTEM_PRICE_FORMATTED' => $arResult["PAY_SYSTEM_PRICE_FORMATTED"],
+		];
+
+		$result['ERROR'] = $arResult["ERROR_SORTED"];
+		$result['WARNING'] = $arResult["WARNING"];
+
+		$arResult['LOCATIONS'] = $this->getLocationsResult();
+
+		foreach (GetModuleEvents("sale", 'OnSaleComponentOrderJsData', true) as $arEvent)
+		{
+			ExecuteModuleEventEx($arEvent, [&$this->arResult, &$this->arParams]);
+		}
+		$this->ses_log($arResult,"getJsDataResult_arRes.txt");
+	}
+
+	/**
+	 * Scales images of all entities depending on scale parameters
+	 *
+	 * @param        $result
+	 * @param string $scale
+	 */
+	public static function scaleImages(&$result, $scale = '')
+	{
+		if (!empty($result) && is_array($result))
+		{
+			if (!empty($result['DELIVERY']) && is_array($result['DELIVERY']))
+			{
+				foreach ($result['DELIVERY'] as $key => $delivery)
+				{
+					if (!empty($delivery["LOGOTIP"]))
+					{
+						self::resizeImage($delivery, 'LOGOTIP', $delivery["LOGOTIP"],
+							["width" => 600, "height" => 600],
+							["width" => 95, "height" => 55],
+							$scale
+						);
+						$result["DELIVERY"][$key] = $delivery;
+					}
+
+				}
+				unset($logotype, $delivery);
+			}
+
+			if (!empty($result['PAY_SYSTEM']) && is_array($result['PAY_SYSTEM']))
+			{
+				foreach ($result['PAY_SYSTEM'] as $key => $paySystem)
+				{
+					if (!empty($paySystem["PSA_LOGOTIP"]))
+					{
+						self::resizeImage($paySystem, 'PSA_LOGOTIP', $paySystem["PSA_LOGOTIP"],
+							["width" => 600, "height" => 600],
+							["width" => 95, "height" => 55],
+							$scale
+						);
+						$result["PAY_SYSTEM"][$key] = $paySystem;
+					}
+				}
+				unset($logotype, $paySystem);
+			}
+
+			if (!empty($result['INNER_PAY_SYSTEM']) && is_array($result['INNER_PAY_SYSTEM']) && !empty($result['INNER_PAY_SYSTEM']["LOGOTIP"]))
+			{
+				self::resizeImage($result['INNER_PAY_SYSTEM'], 'LOGOTIP', $result['INNER_PAY_SYSTEM']["LOGOTIP"],
+					["width" => 600, "height" => 600],
+					["width" => 95, "height" => 55],
+					$scale
+				);
+			}
+
+			if (!empty($result['STORE_LIST']) && is_array($result['STORE_LIST']))
+			{
+				foreach ($result['STORE_LIST'] as $key => $store)
+				{
+					if (!empty($store["IMAGE_ID"]))
+					{
+						self::resizeImage($store, 'IMAGE_ID', $store["IMAGE_ID"],
+							["width" => 320, "height" => 320],
+							["width" => 115, "height" => 115],
+							$scale
+						);
+						$result["STORE_LIST"][$key] = $store;
+					}
+				}
+				unset($logotype, $store);
+			}
+		}
+	}
+
+	/**
+	 * Returns array with locations data output
+	 *
+	 * @return array
+	 */
+	protected function getLocationsResult()
+	{
+		$locations = [];
+		$propertyCollection = $this->order->getPropertyCollection();
+		$properties = $propertyCollection->getArray();
+
+		foreach ($properties['properties'] as $property)
+		{
+			if ($property['UTIL'] == 'Y')
+				continue;
+
+			if ($property['TYPE'] == 'LOCATION')
+			{
+				$locationTemplateP = $this->arParams['TEMPLATE_LOCATION'] == '.default' ? 'steps' : 'search';
+				$locationTemplate = $this->request->get('PERMANENT_MODE_STEPS') == 1 ? 'steps' : $locationTemplateP;
+
+				$locations[$property['ID']]['template'] = $locationTemplate;
+				$locations[$property['ID']]['output'] = $this->getLocationHtml($property, $locationTemplate);
+				$locations[$property['ID']]['showAlt'] = isset($this->arUserResult['ORDER_PROP'][$property['INPUT_FIELD_LOCATION']]);
+				$locations[$property['ID']]['lastValue'] = reset($property['VALUE']);
+
+				if ($property['IS_LOCATION'] === 'Y')
+				{
+					$locations[$property['ID']]['coordinates'] = LocationTable::getRow([
+						'select' => ['LONGITUDE', 'LATITUDE'],
+						'filter' => ['=CODE' => reset($property['VALUE'])],
+					]);
+				}
+			}
+		}
+
+		return $locations;
+	}
+
+	protected function getLocationHtml($property, $locationTemplate)
+	{
+		global $APPLICATION;
+
+		$locationOutput = [];
+		$showDefault = true;
+
+		$propertyId = (int)$property['ID'];
+		$isMultiple = $property['MULTIPLE'] == 'Y' && $property['IS_LOCATION'] != 'Y';
+
+		$locationAltPropDisplayManual = $this->request->get('LOCATION_ALT_PROP_DISPLAY_MANUAL');
+		$altPropManual = isset($locationAltPropDisplayManual[$propertyId]) && (bool)$locationAltPropDisplayManual[$propertyId];
+
+		$location = $this->order->getPropertyCollection()->getItemByOrderPropertyId($propertyId);
+		$actualValues = $location->getValue();
+
+		if (!is_array($actualValues))
+		{
+			$actualValues = [$actualValues];
+		}
+
+		if (!empty($actualValues) && is_array($actualValues))
+		{
+			foreach ($actualValues as $key => $value)
+			{
+				$parameters = [
+					'CODE' => $value,
+					'INPUT_NAME' => 'ORDER_PROP_'.$propertyId.($isMultiple ? '['.$key.']' : ''),
+					'CACHE_TYPE' => 'A',
+					'CACHE_TIME' => '36000000',
+					'SEARCH_BY_PRIMARY' => 'N',
+					'SHOW_DEFAULT_LOCATIONS' => $showDefault ? 'Y' : 'N',
+					'PROVIDE_LINK_BY' => 'code',
+					'JS_CALLBACK' => 'submitFormProxy',
+					'JS_CONTROL_DEFERRED_INIT' => $propertyId.($isMultiple ? '_'.$key : ''),
+					'JS_CONTROL_GLOBAL_ID' => $propertyId.($isMultiple ? '_'.$key : ''),
+					'DISABLE_KEYBOARD_INPUT' => 'Y',
+					'PRECACHE_LAST_LEVEL' => 'N',
+					'PRESELECT_TREE_TRUNK' => 'Y',
+					'SUPPRESS_ERRORS' => 'Y',
+					'FILTER_BY_SITE' => 'Y',
+					'FILTER_SITE_ID' => $this->getSiteId(),
+				];
+
+				ob_start();
+
+				if ($locationTemplate == 'steps')
+				{
+					echo '<input type="hidden" id="LOCATION_ALT_PROP_DISPLAY_MANUAL['.$propertyId
+						.']" name="LOCATION_ALT_PROP_DISPLAY_MANUAL['.$propertyId.']" value="'
+						.($altPropManual ? '1' : '0').'" />';
+				}
+
+				$APPLICATION->IncludeComponent(
+					'bitrix:sale.location.selector.'.$locationTemplate,
+					'',
+					$parameters,
+					null,
+					['HIDE_ICONS' => 'Y']
+				);
+
+				$locationOutput[] = ob_get_contents();
+				ob_end_clean();
+
+				$showDefault = false;
+			}
+		}
+
+		if ($isMultiple)
+		{
+			$parameters = [
+				'CODE' => '',
+				'INPUT_NAME' => 'ORDER_PROP_'.$propertyId.'[#key#]',
+				'CACHE_TYPE' => 'A',
+				'CACHE_TIME' => '36000000',
+				'SEARCH_BY_PRIMARY' => 'N',
+				'SHOW_DEFAULT_LOCATIONS' => 'N',
+				'PROVIDE_LINK_BY' => 'code',
+				'JS_CALLBACK' => 'submitFormProxy',
+				'JS_CONTROL_DEFERRED_INIT' => $propertyId.'_key__',
+				'JS_CONTROL_GLOBAL_ID' => $propertyId.'_key__',
+				'DISABLE_KEYBOARD_INPUT' => 'Y',
+				'PRECACHE_LAST_LEVEL' => 'N',
+				'PRESELECT_TREE_TRUNK' => 'Y',
+				'SUPPRESS_ERRORS' => 'Y',
+				'FILTER_BY_SITE' => 'Y',
+				'FILTER_SITE_ID' => $this->getSiteId(),
+			];
+
+			ob_start();
+
+			$APPLICATION->IncludeComponent(
+				'bitrix:sale.location.selector.'.$locationTemplate,
+				'',
+				$parameters,

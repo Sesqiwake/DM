@@ -1,0 +1,500 @@
+		elseif ($property['IS_PAYER'] === 'Y')
+		{
+			$rsUser = CUser::GetByID($USER->GetID());
+			if ($arUser = $rsUser->Fetch())
+			{
+				$value = CUser::FormatName(
+					CSite::GetNameFormat(false),
+					[
+						'NAME' => $arUser['NAME'],
+						'LAST_NAME' => $arUser['LAST_NAME'],
+						'SECOND_NAME' => $arUser['SECOND_NAME'],
+					],
+					false,
+					false
+				);
+			}
+		}
+		elseif ($property['IS_PHONE'] === 'Y')
+		{
+			$phoneRow = \Bitrix\Main\UserPhoneAuthTable::getRow([
+				'select' => ['PHONE_NUMBER'],
+				'filter' => ['=USER_ID' => $USER->GetID()],
+			]);
+
+			if ($phoneRow)
+			{
+				$value = $phoneRow['PHONE_NUMBER'];
+			}
+			else
+			{
+				$rsUser = CUser::GetByID($USER->GetID());
+
+				if ($arUser = $rsUser->Fetch())
+				{
+					if (!empty($arUser['PERSONAL_PHONE']))
+					{
+						$value = $arUser['PERSONAL_PHONE'];
+					}
+					elseif (!empty($arUser['PERSONAL_MOBILE']))
+					{
+						$value = $arUser['PERSONAL_MOBILE'];
+					}
+				}
+			}
+		}
+		elseif ($property['IS_ADDRESS'] === 'Y')
+		{
+			$rsUser = CUser::GetByID($USER->GetID());
+			if ($arUser = $rsUser->Fetch())
+			{
+				if (!empty($arUser['PERSONAL_STREET']))
+				{
+					$value = $arUser['PERSONAL_STREET'];
+				}
+			}
+		}
+
+		return $value;
+	}
+
+	/**
+	 * Checks all order properties.
+	 *
+	 * @param Order $order
+	 * @param bool $isPersonTypeChanged
+	 * @param bool|null $willUseProfile
+	 * @param array|null $profileProperties
+	 *
+	 * @return void
+	 */
+	protected function checkProperties(
+		Order $order,
+		bool $isPersonTypeChanged,
+		?bool $willUseProfile = null,
+		?array $profileProperties = null
+	): void
+	{
+		$haveProfileId = (int)$this->arUserResult['PROFILE_ID'] > 0;
+
+		if (is_null($willUseProfile))
+		{
+			if ($haveProfileId)
+			{
+				$willUseProfile =
+					$isPersonTypeChanged
+					// first load
+					|| $this->request->getRequestMethod() === 'GET'
+					// just authorized
+					|| $this->request->get('do_authorize') === 'Y'
+					|| $this->request->get('do_register') === 'Y'
+					|| $this->request->get('SMS_CODE')
+					// is profile changed
+					|| $this->arUserResult['PROFILE_CHANGE'] === 'Y'
+				;
+			}
+			else
+			{
+				$willUseProfile = false;
+			}
+		}
+
+		if (is_null($profileProperties))
+		{
+			if ($haveProfileId)
+			{
+				$profileProperties = Sale\OrderUserProperties::getProfileValues((int)$this->arUserResult['PROFILE_ID']);
+			}
+			else
+			{
+				$profileProperties = [];
+			}
+		}
+
+		$this->checkZipProperty($order, $willUseProfile);
+		$this->checkAltLocationProperty($order, $willUseProfile, $profileProperties);
+	}
+
+	/**
+	 * Defines zip value if location was changed.
+	 *
+	 * @param Order $order
+	 * @param       $loadFromProfile
+	 */
+	protected function checkZipProperty(Order $order, $loadFromProfile)
+	{
+		$propertyCollection = $order->getPropertyCollection();
+		$zip = $propertyCollection->getDeliveryLocationZip();
+		$location = $propertyCollection->getDeliveryLocation();
+		if (!empty($zip) && !empty($location))
+		{
+			$locId = $location->getField('ORDER_PROPS_ID');
+			$locValue = $this->arUserResult['ORDER_PROP'][$locId];
+
+			// need to override flag for zip data from profile
+			if ($loadFromProfile)
+			{
+				$this->arUserResult['ZIP_PROPERTY_CHANGED'] = 'Y';
+			}
+
+			$requestLocation = $this->request->get('RECENT_DELIVERY_VALUE');
+			// reload zip when user manually choose another location
+			if ($requestLocation !== null && $locValue !== $requestLocation)
+			{
+				$this->arUserResult['ZIP_PROPERTY_CHANGED'] = 'N';
+			}
+
+			// don't autoload zip property if user manually changed it
+			if ($this->arUserResult['ZIP_PROPERTY_CHANGED'] !== 'Y')
+			{
+				$res = Sale\Location\Admin\LocationHelper::getZipByLocation($locValue);
+
+				if ($arZip = $res->fetch())
+				{
+					if (!empty($arZip['XML_ID']))
+					{
+						$this->arUserResult['ORDER_PROP'][$zip->getField('ORDER_PROPS_ID')] = $arZip['XML_ID'];
+					}
+				}
+			}
+		}
+	}
+
+	/**
+	 * Checks order properties for proper alternate location property display.
+	 *
+	 * @param Order $order
+	 * @param       $useProfileProperties
+	 * @param array $profileProperties
+	 */
+	protected function checkAltLocationProperty(Order $order, $useProfileProperties, array $profileProperties)
+	{
+		$locationAltPropDisplayManual = $this->request->get('LOCATION_ALT_PROP_DISPLAY_MANUAL');
+		$propertyCollection = $order->getPropertyCollection();
+
+		/** @var Sale\PropertyValue $property */
+		foreach ($propertyCollection as $property)
+		{
+			if ($property->isUtil())
+				continue;
+
+			if ($property->getType() == 'LOCATION')
+			{
+				$propertyFields = $property->getProperty();
+				if ((int)$propertyFields['INPUT_FIELD_LOCATION'] > 0)
+				{
+					if ($useProfileProperties)
+					{
+						$deleteAltProp = empty($profileProperties[$propertyFields['INPUT_FIELD_LOCATION']]);
+					}
+					else
+					{
+						$deleteAltProp = !isset($locationAltPropDisplayManual[$propertyFields['ID']])
+							|| !(bool)$locationAltPropDisplayManual[$propertyFields['ID']];
+
+						// check if have no city at all then show alternate property
+						if (
+							isset($locationAltPropDisplayManual[$propertyFields['ID']])
+							&& !$this->haveCitiesInTree($this->arUserResult['ORDER_PROP'][$property->getPropertyId()])
+						)
+						{
+							$deleteAltProp = false;
+						}
+					}
+
+					if ($deleteAltProp)
+					{
+						unset($this->arUserResult['ORDER_PROP'][$propertyFields['INPUT_FIELD_LOCATION']]);
+					}
+				}
+			}
+		}
+	}
+
+	protected function haveCitiesInTree($locationCode)
+	{
+		if (empty($locationCode))
+			return false;
+
+		$haveCities = false;
+		$location = LocationTable::getRow(['filter' => ['=CODE' => $locationCode]]);
+
+		if (!empty($location))
+		{
+			if ($location['TYPE_ID'] >= 5)
+			{
+				$haveCities = true;
+			}
+			else
+			{
+				$parameters = [
+					'filter' => [
+						'>=LEFT_MARGIN' => (int)$location['LEFT_MARGIN'],
+						'<=RIGHT_MARGIN' => (int)$location['RIGHT_MARGIN'],
+						'>=DEPTH_LEVEL' => (int)$location['DEPTH_LEVEL'],
+						'!CITY_ID' => null,
+					],
+					'count_total' => true,
+				];
+				$haveCities = LocationTable::getList($parameters)->getCount() > 0;
+			}
+		}
+
+		return $haveCities;
+	}
+
+	/**
+	 * Returns basket quantity list for orderable items
+	 *
+	 * @param Sale\BasketBase $basket
+	 * @return array
+	 */
+	protected function getActualQuantityList(Sale\BasketBase $basket)
+	{
+		$quantityList = [];
+
+		if (!$basket->isEmpty())
+		{
+			/** @var Sale\BasketItemBase $basketItem */
+			foreach ($basket as $basketItem)
+			{
+				if ($basketItem->canBuy() && !$basketItem->isDelay())
+				{
+					$quantityList[$basketItem->getBasketCode()] = $basketItem->getQuantity();
+				}
+			}
+		}
+
+		return $quantityList;
+	}
+
+	/**
+	 * Append basket(for current FUser) to order object
+	 *
+	 * @param Order $order
+	 * @throws Main\ObjectNotFoundException
+	 */
+	protected function initBasket(Order $order)
+	{
+		$basket = $this->loadBasket();
+
+		$this->arUserResult['QUANTITY_LIST'] = $this->getActualQuantityList($basket);
+
+		$result = $basket->refresh();
+		if ($result->isSuccess())
+		{
+			$basket->save();
+		}
+
+		// right NOW we decide to work only with available basket
+		// full basket won't update anymore
+		$availableBasket = $basket->getOrderableItems();
+		if ($availableBasket->isEmpty())
+		{
+			$this->showEmptyBasket();
+		}
+
+		$order->appendBasket($availableBasket);
+	}
+
+	private function loadBasket()
+	{
+		$registry = Sale\Registry::getInstance(Sale\Registry::REGISTRY_TYPE_ORDER);
+
+		/** @var Sale\Basket $basketClassName */
+		$basketClassName = $registry->getBasketClassName();
+
+		return $basketClassName::loadItemsForFUser(Sale\Fuser::getId(), $this->getSiteId());
+	}
+
+	protected function showEmptyBasket()
+	{
+		global $APPLICATION;
+
+		if ($this->action === 'saveOrderAjax')
+		{
+			$APPLICATION->RestartBuffer();
+			echo json_encode([
+				'order' => [
+					'REDIRECT_URL' => $this->arParams['~CURRENT_PAGE'],
+				],
+			]);
+			die();
+		}
+
+		if ($this->arParams['DISABLE_BASKET_REDIRECT'] === 'Y')
+		{
+			$this->arResult['SHOW_EMPTY_BASKET'] = true;
+
+			if ($this->request->get('json') === 'Y' || $this->isRequestViaAjax)
+			{
+				$APPLICATION->RestartBuffer();
+				echo json_encode([
+					'success' => 'N',
+					'redirect' => $this->arParams['~CURRENT_PAGE'],
+				]);
+				die();
+			}
+		}
+		else
+		{
+			if ($this->request->get('json') === 'Y' || $this->isRequestViaAjax)
+			{
+				$APPLICATION->RestartBuffer();
+				echo json_encode([
+					'success' => 'N',
+					'redirect' => $this->arParams['PATH_TO_BASKET'],
+				]);
+				die();
+			}
+
+			LocalRedirect($this->arParams['PATH_TO_BASKET']);
+			die();
+		}
+	}
+
+	protected function addError($res, $type = 'MAIN')
+	{
+		if ($res instanceof Result)
+		{
+			$errors = $res->getErrorMessages();
+		}
+		else
+		{
+			$errors = [$res];
+		}
+
+		foreach ($errors as $error)
+		{
+			if (!in_array($error, $this->arResult['ERROR'], true))
+			{
+				$this->arResult['ERROR'][] = $error;
+			}
+
+			if (
+				empty($this->arResult['ERROR_SORTED'][$type])
+				|| !in_array($error, $this->arResult['ERROR_SORTED'][$type], true)
+			)
+			{
+				$this->arResult['ERROR_SORTED'][$type][] = $error;
+			}
+		}
+	}
+
+	protected function addWarning($res, $type)
+	{
+		if (
+			!empty($type)
+			&& (
+				empty($this->arResult['WARNING'][$type])
+				|| (!empty($this->arResult['WARNING'][$type]) && !in_array($res, $this->arResult['WARNING'][$type]))
+			)
+		)
+		{
+			$this->arResult['WARNING'][$type][] = $res;
+		}
+	}
+
+	protected static function getEscapedPostValue($name, $value)
+	{
+		$escapedValue = [];
+
+		if (!empty($name))
+		{
+			if (is_array($value))
+			{
+				foreach ($value as $k => $v)
+				{
+					$escapedValue += static::getEscapedPostValue("{$name}[{$k}]", $v);
+				}
+			}
+			else
+			{
+				$escapedValue[htmlspecialcharsbx($name)] = htmlspecialcharsbx($value);
+			}
+		}
+
+		return $escapedValue;
+	}
+
+	/**
+	 * Action - show and process authorization form
+	 *
+	 * @throws Main\ArgumentNullException
+	 */
+	protected function showAuthFormAction()
+	{
+		global $APPLICATION;
+		$arResult =& $this->arResult;
+
+		$request = $this->isRequestViaAjax && $this->request->get('save') != 'Y' ? $this->request->get('order') : $this->request;
+
+		$this->checkSocServicesAuthForm();
+
+		$arResult['AUTH']['USER_LOGIN'] = $request['USER_LOGIN'] <> ''
+			? htmlspecialcharsbx($request['USER_LOGIN'])
+			: htmlspecialcharsbx(${Option::get('main', 'cookie_name', 'BITRIX_SM').'_LOGIN'});
+		$arResult['AUTH']['captcha_registration'] = Option::get('main', 'captcha_registration', 'N') === 'Y' ? 'Y' : 'N';
+
+		if ($arResult['AUTH']['captcha_registration'] === 'Y')
+		{
+			$arResult['AUTH']['capCode'] = htmlspecialcharsbx($APPLICATION->CaptchaGetCode());
+		}
+
+		$arResult['POST'] = [];
+
+		if ($this->request->isPost() && $this->checkSession)
+		{
+			foreach ($request as $name => $value)
+			{
+				if (in_array(
+					$name,
+					[
+						'USER_LOGIN', 'USER_PASSWORD', 'do_authorize', 'NEW_NAME', 'NEW_LAST_NAME', 'NEW_EMAIL',
+						'NEW_GENERATE', 'NEW_LOGIN', 'NEW_PASSWORD', 'NEW_PASSWORD_CONFIRM', 'captcha_sid',
+						'captcha_word', 'do_register', 'is_ajax_post', 'PHONE_NUMBER',
+					]
+				))
+					continue;
+
+				$arResult['POST'] += static::getEscapedPostValue($name, $value);
+			}
+
+			if ($request['do_authorize'] === 'Y')
+			{
+				$this->doAuthorize();
+			}
+			elseif ($request['do_register'] === 'Y' && $arResult['AUTH']['new_user_registration'] === 'Y')
+			{
+				$this->doRegister();
+			}
+			elseif ($this->isRequestViaAjax)
+			{
+				$this->showAjaxAnswer([
+					'order' => [
+						'SHOW_AUTH' => true,
+						'AUTH' => $arResult['AUTH'],
+					],
+				]);
+			}
+		}
+
+		if ($this->isRequestViaAjax)
+		{
+			if (empty($arResult['ERROR']) && empty($arResult['SMS_AUTH']))
+			{
+				$this->refreshOrderAjaxAction();
+			}
+			else
+			{
+				$this->showAjaxAnswer([
+					'order' => [
+						'SHOW_AUTH' => true,
+						'AUTH' => $arResult['AUTH'],
+						'SMS_AUTH' => $arResult['SMS_AUTH'],
+						'ERROR' => $arResult['ERROR_SORTED'],
+					],
+				]);
+			}
+		}
+		else

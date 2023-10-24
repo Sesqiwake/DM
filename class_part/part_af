@@ -1,0 +1,500 @@
+		{
+			$deliveryId = CSaleLocation::getLocationIDbyCODE(current($arProperty['VALUE']));
+			$this->arUserResult['DELIVERY_LOCATION'] = $deliveryId;
+			$this->arUserResult['DELIVERY_LOCATION_BCODE'] = current($arProperty['VALUE']);
+		}
+
+		if ($arProperty['IS_ZIP'] === 'Y')
+		{
+			$this->arUserResult['DELIVERY_LOCATION_ZIP'] = current($arProperty['VALUE']);
+		}
+
+		if ($arProperty['IS_LOCATION4TAX'] === 'Y')
+		{
+			$taxId = CSaleLocation::getLocationIDbyCODE(current($arProperty['VALUE']));
+			$this->arUserResult['TAX_LOCATION'] = $taxId;
+			$this->arUserResult['TAX_LOCATION_BCODE'] = current($arProperty['VALUE']);
+		}
+
+		if ($arProperty['IS_PAYER'] === 'Y')
+		{
+			$this->arUserResult['PAYER_NAME'] = current($arProperty['VALUE']);
+		}
+
+		if ($arProperty['IS_EMAIL'] === 'Y')
+		{
+			$this->arUserResult['USER_EMAIL'] = current($arProperty['VALUE']);
+		}
+
+		if ($arProperty['IS_PROFILE_NAME'] === 'Y')
+		{
+			$this->arUserResult['PROFILE_NAME'] = current($arProperty['VALUE']);
+		}
+
+		switch ($arProperty['TYPE'])
+		{
+			case 'Y/N':
+				self::formatYN($arProperty);
+				break;
+			case 'STRING':
+				self::formatString($arProperty);
+				break;
+			case 'NUMBER':
+				self::formatNumber($arProperty);
+				break;
+			case 'ENUM':
+				self::formatEnum($arProperty);
+				break;
+			case 'LOCATION':
+				self::formatLocation($arProperty, $arDeleteFieldLocation, $this->arResult['LOCATION_ALT_PROP_DISPLAY_MANUAL']);
+				break;
+			case 'FILE':
+				self::formatFile($arProperty);
+				break;
+			case 'DATE':
+				self::formatDate($arProperty);
+				break;
+		}
+
+		return $arProperty;
+	}
+
+	public static function formatYN(array &$arProperty)
+	{
+		$curVal = $arProperty['VALUE'];
+
+		if (current($curVal) == "Y")
+		{
+			$arProperty["CHECKED"] = "Y";
+			$arProperty["VALUE_FORMATED"] = Loc::getMessage("SOA_Y");
+		}
+		else
+			$arProperty["VALUE_FORMATED"] = Loc::getMessage("SOA_N");
+
+		$arProperty["SIZE1"] = (intval($arProperty["SIZE1"]) > 0) ? $arProperty["SIZE1"] : 30;
+
+		$arProperty["VALUE"] = current($curVal);
+		$arProperty["TYPE"] = 'CHECKBOX';
+	}
+
+	public static function formatString(array &$arProperty)
+	{
+		$curVal = $arProperty['VALUE'];
+
+		if (!empty($arProperty["MULTILINE"]) && $arProperty["MULTILINE"] == 'Y')
+		{
+			$arProperty["TYPE"] = 'TEXTAREA';
+			$arProperty["SIZE2"] = (intval($arProperty["ROWS"]) > 0) ? $arProperty["ROWS"] : 4;
+			$arProperty["SIZE1"] = (intval($arProperty["COLS"]) > 0) ? $arProperty["COLS"] : 40;
+		}
+		else
+			$arProperty["TYPE"] = 'TEXT';
+
+		$arProperty["SOURCE"] = current($curVal) == $arProperty['DEFAULT_VALUE'] ? 'DEFAULT' : 'FORM';
+		$arProperty["VALUE"] = current($curVal);
+		$arProperty["VALUE_FORMATED"] = $arProperty["VALUE"];
+	}
+
+	public static function formatNumber(array &$arProperty)
+	{
+		$curVal = $arProperty['VALUE'];
+		$arProperty["TYPE"] = 'TEXT';
+		$arProperty["VALUE"] = current($curVal);
+		$arProperty["VALUE_FORMATED"] = $arProperty["VALUE"];
+	}
+
+	public static function formatEnum(array &$arProperty)
+	{
+		$curVal = $arProperty['VALUE'];
+
+		if ($arProperty["MULTIELEMENT"] == 'Y')
+		{
+			if ($arProperty["MULTIPLE"] == 'Y')
+			{
+				$setValue = [];
+				$arProperty["FIELD_NAME"] = "ORDER_PROP_".$arProperty["ID"].'[]';
+				$arProperty["SIZE1"] = (intval($arProperty["SIZE1"]) > 0) ? $arProperty["SIZE1"] : 5;
+
+				$i = 0;
+				foreach ($arProperty["OPTIONS"] as $val => $name)
+				{
+					$arVariants = [
+						'VALUE' => $val,
+						'NAME' => $name,
+					];
+					if ((is_array($curVal) && in_array($arVariants["VALUE"], $curVal)))
+					{
+						$arVariants["SELECTED"] = "Y";
+						if ($i > 0)
+							$arProperty["VALUE_FORMATED"] .= ", ";
+						$arProperty["VALUE_FORMATED"] .= $arVariants["NAME"];
+						$setValue[] = $arVariants["VALUE"];
+						$i++;
+					}
+					$arProperty["VARIANTS"][] = $arVariants;
+				}
+
+				$arProperty["TYPE"] = 'MULTISELECT';
+			}
+			else
+			{
+				foreach ($arProperty['OPTIONS'] as $val => $name)
+				{
+					$arVariants = [
+						'VALUE' => $val,
+						'NAME' => $name,
+					];
+					if ($arVariants["VALUE"] == current($curVal))
+					{
+						$arVariants["CHECKED"] = "Y";
+						$arProperty["VALUE_FORMATED"] = $arVariants["NAME"];
+					}
+
+					$arProperty["VARIANTS"][] = $arVariants;
+				}
+				$arProperty["TYPE"] = 'RADIO';
+			}
+		}
+		else
+		{
+			if ($arProperty["MULTIPLE"] == 'Y')
+			{
+				$setValue = [];
+				$arProperty["FIELD_NAME"] = "ORDER_PROP_".$arProperty["ID"].'[]';
+				$arProperty["SIZE1"] = ((intval($arProperty["SIZE1"]) > 0) ? $arProperty["SIZE1"] : 5);
+
+				$i = 0;
+				foreach ($arProperty["OPTIONS"] as $val => $name)
+				{
+					$arVariants = [
+						'VALUE' => $val,
+						'NAME' => $name,
+					];
+					if (is_array($curVal) && in_array($arVariants["VALUE"], $curVal))
+					{
+						$arVariants["SELECTED"] = "Y";
+						if ($i > 0)
+							$arProperty["VALUE_FORMATED"] .= ", ";
+						$arProperty["VALUE_FORMATED"] .= $arVariants["NAME"];
+						$setValue[] = $arVariants["VALUE"];
+						$i++;
+					}
+					$arProperty["VARIANTS"][] = $arVariants;
+				}
+
+				$arProperty["TYPE"] = 'MULTISELECT';
+			}
+			else
+			{
+				$arProperty["SIZE1"] = ((intval($arProperty["SIZE1"]) > 0) ? $arProperty["SIZE1"] : 1);
+				$flagDefault = "N";
+				$nameProperty = "";
+				foreach ($arProperty["OPTIONS"] as $val => $name)
+				{
+					$arVariants = [
+						'VALUE' => $val,
+						'NAME' => $name,
+					];
+					if ($flagDefault == "N" && $nameProperty == "")
+					{
+						$nameProperty = $arVariants["NAME"];
+					}
+					if ($arVariants["VALUE"] == current($curVal))
+					{
+						$arVariants["SELECTED"] = "Y";
+						$arProperty["VALUE_FORMATED"] = $arVariants["NAME"];
+						$flagDefault = "Y";
+					}
+					$arProperty["VARIANTS"][] = $arVariants;
+				}
+				if ($flagDefault == "N")
+				{
+					$arProperty["VARIANTS"][0]["SELECTED"] = "Y";
+					$arProperty["VARIANTS"][0]["VALUE_FORMATED"] = $nameProperty;
+				}
+				$arProperty["TYPE"] = 'SELECT';
+			}
+		}
+	}
+
+	public static function formatLocation(array &$arProperty, array &$arDeleteFieldLocation, $locationAltPropDisplayManual = null)
+	{
+		$curVal = CSaleLocation::getLocationIDbyCODE(current($arProperty['VALUE']));
+		$arProperty["VALUE"] = $curVal;
+
+		$locationFound = false;
+		//todo select via D7
+		$dbVariants = CSaleLocation::GetList(
+			["SORT" => "ASC", "COUNTRY_NAME_LANG" => "ASC", "CITY_NAME_LANG" => "ASC"],
+			["LID" => LANGUAGE_ID],
+			false,
+			false,
+			["ID", "COUNTRY_NAME", "CITY_NAME", "SORT", "COUNTRY_NAME_LANG", "CITY_NAME_LANG", "CITY_ID", "CODE"]
+		);
+		while ($arVariants = $dbVariants->GetNext())
+		{
+			$city = !empty($arVariants['CITY_NAME']) ? ' - '.$arVariants['CITY_NAME'] : '';
+
+			if ($arVariants['ID'] === $curVal)
+			{
+				// set formatted value
+				$locationFound = $arVariants;
+				$arVariants['SELECTED'] = 'Y';
+				$arProperty['VALUE_FORMATED'] = $arVariants['COUNTRY_NAME'].$city;
+			}
+
+			$arVariants['NAME'] = $arVariants['COUNTRY_NAME'].$city;
+			// save to variants
+			$arProperty['VARIANTS'][] = $arVariants;
+		}
+
+		if (!$locationFound && intval($curVal))
+		{
+			$item = CSaleLocation::GetById($curVal);
+			if ($item)
+			{
+				// set formatted value
+				$locationFound = $item;
+				$arProperty["VALUE_FORMATED"] = $item["COUNTRY_NAME"].(($item["CITY_NAME"] <> '') ? " - " : "").$item["CITY_NAME"];
+				$item['SELECTED'] = 'Y';
+				$item['NAME'] = $item["COUNTRY_NAME"].(($item["CITY_NAME"] <> '') ? " - " : "").$item["CITY_NAME"];
+
+				// save to variants
+				$arProperty["VARIANTS"][] = $item;
+			}
+		}
+
+		if ($locationFound)
+		{
+			// enable location town text
+			if (isset($locationAltPropDisplayManual)) // its an ajax-hit and sale.location.selector.steps is used
+			{
+				if (intval($locationAltPropDisplayManual[$arProperty["ID"]])) // user MANUALLY selected "Other location" in the selector
+					unset($arDeleteFieldLocation[$arProperty["ID"]]);
+				else
+					$arDeleteFieldLocation[$arProperty["ID"]] = $arProperty["INPUT_FIELD_LOCATION"];
+			}
+			else
+			{
+				if ($arProperty["IS_LOCATION"] == "Y" && intval($arProperty["INPUT_FIELD_LOCATION"]) > 0)
+				{
+					if (intval($locationFound["CITY_ID"]) <= 0)
+						unset($arDeleteFieldLocation[$arProperty["ID"]]);
+					else
+						$arDeleteFieldLocation[$arProperty["ID"]] = $arProperty["INPUT_FIELD_LOCATION"];
+				}
+			}
+		}
+		else
+		{
+			// nothing found, may be it is the first load - hide
+			$arDeleteFieldLocation[$arProperty["ID"]] = $arProperty["INPUT_FIELD_LOCATION"];
+		}
+	}
+
+	public static function formatFile(array &$arProperty)
+	{
+		$curVal = $arProperty['VALUE'];
+
+		$arProperty["SIZE1"] = intval($arProperty["SIZE1"]);
+		if ($arProperty['MULTIPLE'] == 'Y')
+		{
+			$arr = [];
+			$curVal = isset($curVal) ? $curVal : $arProperty["DEFAULT_VALUE"];
+			foreach ($curVal as $file)
+			{
+				$arr[] = $file['ID'];
+			}
+			$arProperty["VALUE"] = serialize($arr);
+		}
+		else
+		{
+			$arFile = isset($curVal) && is_array($curVal) ? current($curVal) : $arProperty["DEFAULT_VALUE"];
+			if (is_array($arFile))
+				$arProperty["VALUE"] = $arFile['ID'];
+		}
+	}
+
+	public static function formatDate(array &$arProperty)
+	{
+		$arProperty["VALUE"] = current($arProperty['VALUE']);
+		$arProperty["VALUE_FORMATED"] = $arProperty["VALUE"];
+	}
+
+	/**
+	 * Set basket items data from order object to $this->arResult
+	 */
+	protected function obtainBasket()
+	{
+		$arResult =& $this->arResult;
+
+		$arResult["MAX_DIMENSIONS"] = $arResult["ITEMS_DIMENSIONS"] = [];
+		$arResult["BASKET_ITEMS"] = [];
+
+		$this->calculateBasket = $this->order->getBasket()->createClone();
+
+		$discounts = $this->order->getDiscount();
+		$showPrices = $discounts->getShowPrices();
+		if (!empty($showPrices['BASKET']))
+		{
+			foreach ($showPrices['BASKET'] as $basketCode => $data)
+			{
+				$basketItem = $this->calculateBasket->getItemByBasketCode($basketCode);
+				if ($basketItem instanceof Sale\BasketItemBase)
+				{
+					$basketItem->setFieldNoDemand('BASE_PRICE', $data['SHOW_BASE_PRICE']);
+					$basketItem->setFieldNoDemand('PRICE', $data['SHOW_PRICE']);
+					$basketItem->setFieldNoDemand('DISCOUNT_PRICE', $data['SHOW_DISCOUNT']);
+				}
+			}
+		}
+		unset($showPrices);
+
+		/** @var Sale\BasketItem $basketItem */
+		foreach ($this->calculateBasket as $basketItem)
+		{
+			$arBasketItem = $basketItem->getFieldValues();
+			if ($basketItem->getVatRate() > 0)
+			{
+				$arResult["bUsingVat"] = "Y";
+				$arBasketItem["VAT_VALUE"] = $basketItem->getVat();
+			}
+			$arBasketItem["QUANTITY"] = $basketItem->getQuantity();
+			$arBasketItem["PRICE_FORMATED"] = SaleFormatCurrency($basketItem->getPrice(), $this->order->getCurrency());
+			$arBasketItem["WEIGHT_FORMATED"] = roundEx(doubleval($basketItem->getWeight() / $arResult["WEIGHT_KOEF"]), SALE_WEIGHT_PRECISION)." ".$arResult["WEIGHT_UNIT"];
+			$arBasketItem["DISCOUNT_PRICE"] = $basketItem->getDiscountPrice();
+
+			$arBasketItem["DISCOUNT_PRICE_PERCENT"] = 0;
+			if ($arBasketItem['CUSTOM_PRICE'] != 'Y')
+			{
+				$arBasketItem['DISCOUNT_PRICE_PERCENT'] = Sale\Discount::calculateDiscountPercent(
+					$arBasketItem['BASE_PRICE'],
+					$arBasketItem['DISCOUNT_PRICE']
+				);
+				if ($arBasketItem['DISCOUNT_PRICE_PERCENT'] === null)
+					$arBasketItem['DISCOUNT_PRICE_PERCENT'] = 0;
+			}
+			$arBasketItem["DISCOUNT_PRICE_PERCENT_FORMATED"] = $arBasketItem['DISCOUNT_PRICE_PERCENT'].'%';
+
+			$arBasketItem["BASE_PRICE_FORMATED"] = SaleFormatCurrency($basketItem->getBasePrice(), $this->order->getCurrency());
+
+			$arDim = $basketItem->getField('DIMENSIONS');
+
+			if (is_string($arDim))
+			{
+				$arDim = unserialize($basketItem->getField('DIMENSIONS'), ['allowed_classes' => false]);
+			}
+
+			if (is_array($arDim))
+			{
+				$arResult["MAX_DIMENSIONS"] = CSaleDeliveryHelper::getMaxDimensions(
+					[
+						$arDim["WIDTH"],
+						$arDim["HEIGHT"],
+						$arDim["LENGTH"],
+					],
+					$arResult["MAX_DIMENSIONS"]);
+
+				$arResult["ITEMS_DIMENSIONS"][] = $arDim;
+			}
+
+			$arBasketItem["PROPS"] = [];
+			/** @var Sale\BasketPropertiesCollection $propertyCollection */
+			$propertyCollection = $basketItem->getPropertyCollection();
+			$propList = $propertyCollection->getPropertyValues();
+			foreach ($propList as $key => &$prop)
+			{
+				if ($prop['CODE'] == 'CATALOG.XML_ID' || $prop['CODE'] == 'PRODUCT.XML_ID' || $prop['CODE'] == 'SUM_OF_CHARGE')
+					continue;
+
+				$prop = array_filter($prop, ["CSaleBasketHelper", "filterFields"]);
+				$arBasketItem["PROPS"][] = $prop;
+			}
+
+			$this->arElementId[] = $arBasketItem["PRODUCT_ID"];
+			$arBasketItem["SUM_NUM"] = $basketItem->getPrice() * $basketItem->getQuantity();
+			$arBasketItem["SUM"] = SaleFormatCurrency(
+				$arBasketItem["SUM_NUM"],
+				$this->order->getCurrency()
+			);
+
+			$arBasketItem["SUM_BASE"] = $basketItem->getBasePrice() * $basketItem->getQuantity();
+			$arBasketItem["SUM_BASE_FORMATED"] = SaleFormatCurrency(
+				$arBasketItem["SUM_BASE"],
+				$this->order->getCurrency()
+			);
+
+			$arBasketItem["SUM_DISCOUNT_DIFF"] = $arBasketItem["SUM_BASE"] - $arBasketItem["SUM_NUM"];
+			$arBasketItem["SUM_DISCOUNT_DIFF_FORMATED"] = SaleFormatCurrency(
+				$arBasketItem["SUM_DISCOUNT_DIFF"],
+				$this->order->getCurrency()
+			);
+
+			$arResult["BASKET_ITEMS"][] = $arBasketItem;
+		}
+	}
+
+	/**
+	 * Set basket items data from iblocks (basket column properties, sku, preview pictures, etc) to $this->arResult
+	 */
+	protected function obtainPropertiesForIbElements()
+	{
+		if (empty($this->arElementId))
+		{
+			return;
+		}
+
+		$arResult =& $this->arResult;
+		$arResult["GRID"]["ROWS"] = [];
+		$arParents = [];
+
+		if ($this->useCatalog)
+		{
+			$arParents = CCatalogSku::getProductList($this->arElementId);
+			if (!empty($arParents))
+			{
+				foreach ($arParents as $productId => $arParent)
+				{
+					$this->arElementId[] = $arParent["ID"];
+					$this->arSku2Parent[$productId] = $arParent["ID"];
+				}
+			}
+		}
+
+		$arElementData = [];
+		$arProductData = [];
+		$elementIndex = [];
+		$res = CIBlockElement::GetList(
+			[],
+			["=ID" => array_unique($this->arElementId)],
+			false,
+			false,
+			["ID", "IBLOCK_ID", "PREVIEW_PICTURE", "DETAIL_PICTURE", "PREVIEW_TEXT"]
+		);
+		while ($arElement = $res->Fetch())
+		{
+			$arElementData[$arElement["IBLOCK_ID"]][] = $arElement["ID"];
+			$arProductData[$arElement["ID"]] = $arElement;
+			$elementIndex[$arElement["ID"]] = [];
+		}
+
+		foreach ($arElementData as $iBlockId => $arElemId)
+		{
+			$arCodes = [];
+			if (!empty($this->arIblockProps[$iBlockId]))
+				$arCodes = array_keys($this->arIblockProps[$iBlockId]);
+
+			$imageCode = $this->arParams['ADDITIONAL_PICT_PROP'][$iBlockId];
+
+			if (!empty($imageCode) && !in_array($imageCode, $arCodes))
+				$arCodes[] = $imageCode;
+
+			if (!empty($arCodes))
+			{
+				CIBlockElement::GetPropertyValuesArray($elementIndex, $iBlockId,
+					["ID" => $arElemId],
+					["CODE" => $arCodes]
+				);
+			}
+		}
+		unset($arElementData);

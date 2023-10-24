@@ -1,0 +1,226 @@
+			$siteId = $this->getSiteId();
+			Sale\BasketComponentHelper::clearFUserBasketPrice($fUserId, $siteId);
+			Sale\BasketComponentHelper::clearFUserBasketQuantity($fUserId, $siteId);
+		}
+		else
+		{
+			$this->addError($res, 'MAIN');
+		}
+
+		if ($arResult['HAVE_PREPAYMENT'] && empty($arResult['ERROR']))
+		{
+			$this->prepayOrder();
+		}
+
+		if (empty($arResult['ERROR']))
+		{
+			$this->saveProfileData();
+		}
+
+		if (empty($arResult['ERROR']))
+		{
+			$this->addStatistic();
+
+			if ($saveToSession)
+			{
+				if (!is_array($_SESSION['SALE_ORDER_ID']))
+				{
+					$_SESSION['SALE_ORDER_ID'] = [];
+				}
+
+				$_SESSION['SALE_ORDER_ID'][] = $res->getId();
+			}
+		}
+
+		foreach (GetModuleEvents('sale', 'OnSaleComponentOrderOneStepComplete', true) as $arEvent)
+		{
+			ExecuteModuleEventEx($arEvent, [$arResult['ORDER_ID'], $this->order->getFieldValues(), $this->arParams]);
+		}
+	}
+
+	public function executeComponent()
+	{
+		global $APPLICATION;
+
+		$this->setFrameMode(false);
+		$this->context = Main\Application::getInstance()->getContext();
+		$this->checkSession = $this->arParams["DELIVERY_NO_SESSION"] == "N" || check_bitrix_sessid();
+		$this->isRequestViaAjax = $this->request->isPost() && $this->request->get('via_ajax') == 'Y';
+		$isAjaxRequest = $this->request["is_ajax_post"] == "Y";
+
+		if ($isAjaxRequest)
+			$APPLICATION->RestartBuffer();
+
+		$this->action = $this->prepareAction();
+		Sale\Compatible\DiscountCompatibility::stopUsageCompatible();
+		$this->doAction($this->action);
+		Sale\Compatible\DiscountCompatibility::revertUsageCompatible();
+
+		if (!$isAjaxRequest)
+		{
+			CJSCore::Init(['fx', 'popup', 'window', 'ajax', 'date']);
+		}
+
+		//is included in all cases for old template
+		$this->includeComponentTemplate();
+
+		if ($isAjaxRequest)
+		{
+			$APPLICATION->FinalActions();
+			die();
+		}
+	}
+
+	public function customEditOrderWithDmPoints()
+	{
+		global $USER;
+		$arResult =& $this->arResult;
+		$result =& $this->arResult['JS_DATA'];
+
+		$bonusesDeclension = new Declension('балл', 'балла', 'баллов');
+
+		$allBonuses = 0;
+		if ($USER->IsAuthorized()) {
+    		$userInfo = $USER->GetByID($USER->GetID())->fetch();
+		    $bonuses = $userInfo['UF_SCORES'] ?? 0;
+		    $arResult['BONUSES'] = $bonuses . ' ' . $bonusesDeclension->get($bonuses);
+		    $allBonuses = intval($bonuses);
+		} else {
+		    $arResult['BONUSES'] = 0 . ' баллов';
+		}
+
+		$bonuses = $this->request->get('APPLY_BONUSES');
+
+		if ($bonuses) {
+			if (intval($arResult['ORDER_PRICE'] * 0.1) < intval($bonuses)) {
+				$bonuses = intval($arResult['ORDER_PRICE'] * 0.1);
+			}
+
+			if ($allBonuses < $bonuses) {
+				$bonuses = intval($allBonuses);
+			}
+
+			$arResult['ORDER_TOTAL_PRICE'] -= $bonuses;
+		}
+
+		$arResult['APPLY_BONUSES'] = $bonuses;
+		$arResult['ORDER_TOTAL_PRICE_FORMATED'] = SaleFormatCurrency($arResult['ORDER_TOTAL_PRICE'], $this->order->getCurrency());
+
+		if ($bonuses && $USER->IsAuthorized() && $bonuses > 0) {
+		    $totalBasketPrice = 0;
+		    foreach ($arResult['BASKET_ITEMS'] as $item) {
+		        $totalBasketPrice += $item['PRICE'];
+		    }
+
+		    // Распределите бонусы между товарами
+		    foreach ($arResult['BASKET_ITEMS'] as &$item) {
+		        $originalPrice = $item['PRICE'];
+
+		        $itemShare = $originalPrice / $totalBasketPrice; // доля каждого товара в общей стоимости заказа
+		        $itemBonus = $bonuses * $itemShare; // бонусы для данного товара
+
+		        if ($itemBonus > $originalPrice) {
+		            $itemBonus = $originalPrice;
+		        }
+
+		        // Примените скидку на товар и установите необходимые параметры
+		        $item['PRICE'] -= $itemBonus;
+		        $item['DISCOUNT_PRICE'] = $itemBonus;
+		        $item['DISCOUNT_PRICE_PERCENT'] = ($itemBonus / $originalPrice) * 100;
+		        $item['DISCOUNT_PRICE_PERCENT_FORMATED'] = round($item['DISCOUNT_PRICE_PERCENT']) . '%';
+		        $item['DISCOUNT_NAME'] = "Скидка по бонусным баллам";
+		        $item['DISCOUNT_VALUE'] = SaleFormatCurrency($itemBonus, $item['CURRENCY']);
+		        $item['CUSTOM_PRICE'] = 'Y';
+
+		        // Обновите SUM_DISCOUNT_DIFF и SUM_DISCOUNT_DIFF_FORMATED
+		        $item['SUM_DISCOUNT_DIFF'] = $itemBonus * $item['QUANTITY'];
+		        $item['SUM_DISCOUNT_DIFF_FORMATED'] = SaleFormatCurrency($item['SUM_DISCOUNT_DIFF'], $item['CURRENCY']);
+
+		        $bonuses -= $itemBonus; // уменьшите общую сумму бонусов
+		    }
+
+		    $totalDiscount = 0;  // общая сумма скидки
+		    foreach ($arResult['BASKET_ITEMS'] as $item) {
+		        $totalDiscount += $item['DISCOUNT_PRICE'];
+		    }
+
+		    $arResult['DISCOUNT_PRICE'] = $totalDiscount;
+		    $arResult['DISCOUNT_PERCENT'] = ($totalDiscount / $arResult['ORDER_TOTAL_PRICE']) * 100;
+		    $arResult['ORDER_TOTAL_PRICE'] -= $totalDiscount;
+			$arResult['ORDER_PRICE'] -= $totalDiscount;
+			$arResult['ORDER_PRICE_FORMATED'] = SaleFormatCurrency($arResult['ORDER_PRICE'], $this->order->getCurrency());
+
+			// $result["TOTAL"]['DISCOUNT_PRICE'] = $arResult['DISCOUNT_PRICE'];
+			// $result["TOTAL"]['DISCOUNT_PERCENT'] = $arResult['DISCOUNT_PERCENT'];
+			// $result["TOTAL"]['ORDER_TOTAL_PRICE'] = $arResult['ORDER_TOTAL_PRICE'];
+			// $result["TOTAL"]['ORDER_PRICE'] = $arResult['ORDER_PRICE'];
+			// $result["TOTAL"]['ORDER_PRICE_FORMATED'] = $arResult['ORDER_PRICE_FORMATED'];
+			// $result["TOTAL"]['DISCOUNT_PRICE_FORMATED'] = SaleFormatCurrency($arResult['DISCOUNT_PRICE'], $this->order->getCurrency());
+			$result['TOTAL'] = [
+									'BASKET_POSITIONS' => $arResult["BASKET_POSITIONS"],
+									'PRICE_WITHOUT_DISCOUNT_VALUE' => $arResult["PRICE_WITHOUT_DISCOUNT_VALUE"],
+									'PRICE_WITHOUT_DISCOUNT' => $arResult["PRICE_WITHOUT_DISCOUNT"],
+									'BASKET_PRICE_DISCOUNT_DIFF_VALUE' => $totalDiscount,
+									'BASKET_PRICE_DISCOUNT_DIFF' => FormatCurrency($totalDiscount, $this->order->getCurrency()),
+									'PAYED_FROM_ACCOUNT_FORMATED' => $arResult["PAYED_FROM_ACCOUNT_FORMATED"],
+									'ORDER_TOTAL_PRICE' => $arResult["ORDER_TOTAL_PRICE"],
+									'ORDER_TOTAL_PRICE_FORMATED' => $arResult["ORDER_TOTAL_PRICE_FORMATED"],
+									'ORDER_TOTAL_LEFT_TO_PAY' => $arResult["ORDER_TOTAL_LEFT_TO_PAY"],
+									'ORDER_TOTAL_LEFT_TO_PAY_FORMATED' => $arResult["ORDER_TOTAL_LEFT_TO_PAY_FORMATED"],
+									'ORDER_WEIGHT' => $arResult["ORDER_WEIGHT"],
+									'ORDER_WEIGHT_FORMATED' => $arResult["ORDER_WEIGHT_FORMATED"],
+									'ORDER_PRICE' => $arResult["ORDER_PRICE"],
+									'ORDER_PRICE_FORMATED' => $arResult["ORDER_PRICE_FORMATED"],
+									'USE_VAT' => $arResult["USE_VAT"],
+									'VAT_RATE' => $arResult["VAT_RATE"],
+									'VAT_SUM' => $arResult["VAT_SUM"],
+									'VAT_SUM_FORMATED' => $arResult["VAT_SUM_FORMATED"],
+									'TAX_PRICE' => $arResult["TAX_PRICE"],
+									'TAX_LIST' => $arResult["TAX_LIST"],
+									'DISCOUNT_PRICE' => $arResult["DISCOUNT_PRICE"],
+									'DISCOUNT_PRICE_FORMATED' => $arResult["DISCOUNT_PRICE_FORMATED"],
+									'DELIVERY_PRICE' => $arResult["DELIVERY_PRICE"],
+									'DELIVERY_PRICE_FORMATED' => $arResult["DELIVERY_PRICE_FORMATED"],
+									'PAY_SYSTEM_PRICE' => $arResult["PAY_SYSTEM_PRICE"],
+									'PAY_SYSTEM_PRICE_FORMATTED' => $arResult["PAY_SYSTEM_PRICE_FORMATTED"],
+								];
+
+			$result['APPLY_BONUSES'] = $arResult['APPLY_BONUSES'];		
+		    $result['BONUSES'] = $arResult['BONUSES'];
+			$this->ses_log($arResult,"editOrderInfo.txt");
+		}
+	}
+
+    private function ses_log_Step($number, $word, $filename = 'ses_log_Step.txt'){
+    	$filePatch = $_SERVER['DOCUMENT_ROOT']."/ses_log/".$filename;
+    	$currentDateTime = date("Y-m-d H:i:s"); // Получаем текущую дату и время
+    	$formattedString = $currentDateTime . " - №" . $number . " - " . $word . PHP_EOL;
+    	if (!file_exists($filePatch)) {
+            touch($filePatch); // Создает файл
+            chmod($filePatch, 0777); // Устанавливает права доступа
+        }
+        if ($file = fopen($filePatch, 'a')) {
+            $data = print_r($formattedString, true);
+            fwrite($file, $data);
+            fclose($file);
+        }
+    }
+
+    private function ses_log($print_array, $filename = 'ses_log.txt'){
+        $filePatch = $_SERVER['DOCUMENT_ROOT']."/ses_log/".$filename;
+        $currentDateTime = date("Y-m-d H:i:s"); // Получаем текущую дату и время
+        $separatorLine = "------------------------------------------";
+        if (!file_exists($filePatch)) {
+            touch($filePatch); // Создает файл
+            chmod($filePatch, 0777); // Устанавливает права доступа
+        }
+        if ($file = fopen($filePatch, 'w')) {
+            fwrite($file, "--------" . $currentDateTime .  "--------\n");
+            $data = print_r($print_array, true);
+            fwrite($file, $data);
+            fwrite($file, "\n" . $separatorLine . "\n");
+            fclose($file);
+        }
+    }
+
+}
