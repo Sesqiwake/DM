@@ -19,6 +19,7 @@ use Bitrix\Sale\PersonType;
 use Bitrix\Sale\Result;
 use Bitrix\Sale\Services\Company;
 use Bitrix\Sale\Shipment;
+use Bitrix\Sale\Shipments;
 use Bitrix\Main\UserTable;
 use Bitrix\Main\Grid\Declension;
 if (!defined('B_PROLOG_INCLUDED') || B_PROLOG_INCLUDED !== true)
